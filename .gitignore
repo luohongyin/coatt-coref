@@ -6,3 +6,7 @@ conll-2012
 *.txt
 *.txt.filtered
 *.v*_*_conll
+conll-2012/*
+logs/*
+ontonotes-release-5.0/*
+.vscode/*

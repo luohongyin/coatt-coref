@@ -62,6 +62,44 @@ def maybe_divide(x, y):
 def projection(inputs, output_size, initializer=None):
   return ffnn(inputs, 0, -1, output_size, dropout=None, output_weights_initializer=initializer)
 
+def projection_comp(a, b, c, d, output_size, name, initializer=None):
+  return ffnn_name(a, 0, -1, output_size, '{}_a'.format(name), dropout=None, output_weights_initializer=initializer)+\
+            ffnn_name(b, 0, -1, output_size, '{}_b'.format(name), dropout=None, output_weights_initializer=initializer)+\
+            ffnn_name(c, 0, -1, output_size, '{}_c'.format(name), dropout=None, output_weights_initializer=initializer)+\
+            ffnn_name(d, 0, -1, output_size, '{}_d'.format(name), dropout=None, output_weights_initializer=initializer)
+
+def projection_name(inputs, output_size, name, initializer=None):
+  return ffnn_name(inputs, 0, -1, output_size, name, dropout=None, output_weights_initializer=initializer)
+
+def ffnn_name(inputs, num_hidden_layers, hidden_size, output_size, name, dropout, output_weights_initializer=None):
+  if len(inputs.get_shape()) > 2:
+    current_inputs = tf.reshape(inputs, [-1, shape(inputs, -1)])
+  else:
+    current_inputs = inputs
+
+  for i in xrange(num_hidden_layers):
+    with tf.variable_scope("attention", reuse=tf.AUTO_REUSE):
+      hidden_weights = tf.get_variable("hidden_weights_{}_{}".format(i, name), [shape(current_inputs, 1), hidden_size])
+      hidden_bias = tf.get_variable("hidden_bias_{}_{}".format(i, name), [hidden_size])
+      current_outputs = tf.nn.relu(tf.matmul(current_inputs, hidden_weights) + hidden_bias)
+
+    if dropout is not None:
+      current_outputs = tf.nn.dropout(current_outputs, dropout)
+    current_inputs = current_outputs
+
+  with tf.variable_scope("attention", reuse=tf.AUTO_REUSE):
+    output_weights = tf.get_variable("output_weights_{}".format(name), [shape(current_inputs, 1), output_size], initializer=output_weights_initializer)
+    output_bias = tf.get_variable("output_bias_{}".format(name), [output_size])
+    outputs = tf.matmul(current_inputs, output_weights) + output_bias
+
+  if len(inputs.get_shape()) == 3:
+    outputs = tf.reshape(outputs, [shape(inputs, 0), shape(inputs, 1), output_size])
+  elif len(inputs.get_shape()) == 4:
+    outputs = tf.reshape(outputs, [shape(inputs, 0), shape(inputs, 1), shape(inputs, 2), output_size])
+  elif len(inputs.get_shape()) > 4:
+    raise ValueError("FFNN with rank {} not supported".format(len(inputs.get_shape())))
+  return outputs
+
 def shape(x, dim):
   return x.get_shape()[dim].value or tf.shape(x)[dim]
 
@@ -86,7 +124,9 @@ def ffnn(inputs, num_hidden_layers, hidden_size, output_size, dropout, output_we
 
   if len(inputs.get_shape()) == 3:
     outputs = tf.reshape(outputs, [shape(inputs, 0), shape(inputs, 1), output_size])
-  elif len(inputs.get_shape()) > 3:
+  elif len(inputs.get_shape()) == 4:
+    outputs = tf.reshape(outputs, [shape(inputs, 0), shape(inputs, 1), shape(inputs, 1), output_size])
+  elif len(inputs.get_shape()) > 4:
     raise ValueError("FFNN with rank {} not supported".format(len(inputs.get_shape())))
   return outputs
 

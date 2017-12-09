@@ -23,10 +23,10 @@ if __name__ == "__main__":
   config["log_dir"] = util.mkdirs(os.path.join(config["log_root"], name))
   util.print_config(config)
 
-  if "GPU" in os.environ:
-    util.set_gpus(int(os.environ["GPU"]))
-  else:
-    util.set_gpus()
+  # if "GPU" in os.environ:
+  #   util.set_gpus([0])
+  # else:
+  #   util.set_gpus([0])
 
   model = cm.CorefModel(config)
   saver = tf.train.Saver()
@@ -49,8 +49,13 @@ if __name__ == "__main__":
     accumulated_loss = 0.0
     initial_time = time.time()
     while not sv.should_stop():
-      tf_loss, tf_global_step, _ = session.run([model.loss, model.global_step, model.train_op])
+      tf_loss, tf_global_step, _ = session.run([model.loss,
+                                                            model.global_step,
+                                                            model.train_op])
       accumulated_loss += tf_loss
+      # print nw
+      # print nm
+      # print x + 1
 
       if tf_global_step % report_frequency == 0:
         total_time = time.time() - initial_time
