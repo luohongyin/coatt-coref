@@ -9,7 +9,7 @@ import random
 
 import numpy as np
 import tensorflow as tf
-import coref_cmodel_nm as cm
+import coref_cmodel_opt as cm
 import util
 
 if __name__ == "__main__":
