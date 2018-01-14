@@ -241,7 +241,7 @@ class CorefModel(object):
     flattened_text_emb = self.flatten_emb_by_sentence(text_emb, text_len_mask) # [num_words]
     self.flattened_sentence_indices = flattened_sentence_indices
 
-    text_conv = tf.expand_dims(text_outputs, 0)
+    text_conv = tf.expand_dims(flattened_text_emb, 0)
     text_conv = util.cnn_name(text_conv, [5], 100, 'tag_conv_1')
     text_conv = util.cnn_name(text_conv, [5], 100, 'tag_conv_2')
     text_conv = util.cnn_name(text_conv, [3], 100, 'tag_conv_3')[0]
