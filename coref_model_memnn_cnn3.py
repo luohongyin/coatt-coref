@@ -282,6 +282,7 @@ class CorefModel(object):
     self.mention_ends = mention_ends
     self.tag_outputs = tag_outputs
     self.tag_seq = tag_seq
+    self.cluster_ids = cluster_ids
 
     mention_emb = self.get_mention_emb(flattened_text_emb, text_outputs, mention_starts, mention_ends) # [num_candidates, emb]
     # mention_scores = tf.convert_to_tensor([self.get_mention_prob(tag_prob_transpose, mention_starts[i], mention_ends[i], num_words)
