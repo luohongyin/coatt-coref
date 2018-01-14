@@ -243,7 +243,7 @@ class CorefModel(object):
     self.flattened_sentence_indices = flattened_sentence_indices
 
     # text_conv = tf.expand_dims(text_outputs, 0)
-    text_conv = tf.expand_dims(tf.concat([text_outputs, flattened_text_emb], 1), 0)
+    text_conv = tf.expand_dims(flattened_text_emb, 0)
     text_conv = util.cnn_name(text_conv, [5], 100, 'tag_conv')[0]
     text_conv = tf.nn.dropout(text_conv, self.dropout)
 
