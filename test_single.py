@@ -9,12 +9,12 @@ import random
 
 import numpy as np
 import tensorflow as tf
-import coref_model as cm
+import coref_model_memnn as cm
 import util
 
 if __name__ == "__main__":
 
-  util.set_gpus()
+  # util.set_gpus()
 
   if len(sys.argv) > 1:
     name = sys.argv[1]

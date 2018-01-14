@@ -145,6 +145,11 @@ class CorefModel(object):
     return word_emb, char_index, text_len, speaker_ids, genre, is_training, gold_starts, gold_ends, cluster_ids
 
   def get_predictions_and_loss(self, word_emb, char_index, text_len, speaker_ids, genre, is_training, gold_starts, gold_ends, cluster_ids):
+
+    self.gold_starts = gold_starts
+    self.gold_ends = gold_ends
+    self.cluster_ids = cluster_ids
+
     self.dropout = 1 - (tf.to_float(is_training) * self.config["dropout_rate"])
     self.lexical_dropout = 1 - (tf.to_float(is_training) * self.config["lexical_dropout_rate"])
 

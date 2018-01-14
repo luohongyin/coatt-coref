@@ -53,6 +53,130 @@ private:
 
 REGISTER_KERNEL_BUILDER(Name("Spans").Device(DEVICE_CPU), SpansOp);
 
+REGISTER_OP("Memory")
+.Attr("num_words: int")
+.Input("tag_seq: int32")
+.Input("tag_high: float32")
+.Output("starts: int32")
+.Output("ends: int32")
+.Output("tag_scores: float32");
+
+class MemoryOp : public OpKernel {
+public:
+  explicit MemoryOp(OpKernelConstruction* context) : OpKernel(context) {
+    OP_REQUIRES_OK(context, context->GetAttr("num_words", &_num_words));
+  }
+
+  void Compute(OpKernelContext* context) override {
+    TTypes<int32>::ConstVec tag_seq = context->input(0).vec<int32>();
+    TTypes<float>::ConstVec tag_high = context->input(1).vec<float>();
+    int length = tag_seq.dimension(0);
+
+    std::vector<std::pair<int, int>> spans;
+    std::vector<float> scores;
+
+    int cspan_type = 0;
+    int cspan_start = 0;
+    int cspan_end = 0;
+    int nspan_type = 1;
+    float score = 0;
+    int span_length = 0;
+    int num_mention = 0;
+    int cached = 0;
+
+    float cscore = 0;
+
+    for (int i = 0; i < length; i++) {
+
+      if (tag_seq(i) == 2) {
+        if (cached == 1) {
+          spans.emplace_back(cspan_start, cspan_end);
+          scores.emplace_back(0);
+        }
+        cspan_start = i;
+        cspan_end = i;
+        cached = 1;
+      }
+      else if (tag_seq(i) == 1) {
+        if (cached == 1) cspan_end = i;
+      }
+      else if (tag_seq(i) == 0) {
+        if (cached == 1) {
+          spans.emplace_back(cspan_start, cspan_end);
+          scores.emplace_back(0);
+        }
+        cached = 0;
+      }
+
+      /*
+      if (tag_seq(i) == 0 && i != length - 1) {cspan_type = 0; continue;}
+
+      cscore = tag_high(i);
+
+      if (tag_seq(i) == 2) {
+        if (num_mention > 0) {
+          spans.emplace_back(cspan_start, cspan_end);
+          scores.emplace_back(score / span_length);
+        }
+        score = cscore;
+        span_length = 1;
+        cspan_start = i;
+        cspan_end = i;
+        cspan_type = 1;
+        num_mention += 1;
+        if (i == length - 1) {
+          spans.emplace_back(cspan_start, cspan_end);
+          scores.emplace_back(cscore);
+        }
+      }
+      else if (tag_seq(i) == 1 && cspan_type == 1) {
+        score += cscore;
+        span_length += 1;
+        cspan_end = i;
+        // nspan_type = 1 - cspan_type;
+        if (i == length - 1) {
+          spans.emplace_back(cspan_start, i);
+          scores.emplace_back(score / span_length);
+        }
+      }
+      else if (i == length - 1) {
+        spans.emplace_back(cspan_start, cspan_end);
+        scores.emplace_back(score / span_length);
+      }
+      */
+    }
+
+    if (cached == 1) {
+      spans.emplace_back(cspan_start, cspan_end);
+      scores.emplace_back(0);
+    }
+
+    Tensor* starts_tensor = nullptr;
+    Tensor* ends_tensor = nullptr;
+    Tensor* scores_tensor = nullptr;
+    TensorShape outputs_shape({static_cast<int64>(spans.size())});
+    TensorShape scores_shape({static_cast<int64>(scores.size())});
+    OP_REQUIRES_OK(context, context->allocate_output(0, outputs_shape, &starts_tensor));
+    OP_REQUIRES_OK(context, context->allocate_output(1, outputs_shape, &ends_tensor));
+    OP_REQUIRES_OK(context, context->allocate_output(2, scores_shape, &scores_tensor));
+    TTypes<int32>::Vec starts = starts_tensor->vec<int32>();
+    TTypes<int32>::Vec ends = ends_tensor->vec<int32>();
+    TTypes<float>::Vec tag_scores = scores_tensor->vec<float>();
+
+    for (int i = 0; i < spans.size(); ++i) {
+      const std::pair<int, int>& span = spans[i];
+      starts(i) = span.first;
+      ends(i) = span.second;
+      tag_scores(i) = scores[i];
+    }
+  }
+
+private:
+  int _num_words;
+};
+
+REGISTER_KERNEL_BUILDER(Name("Memory").Device(DEVICE_CPU), MemoryOp);
+
 
 REGISTER_OP("Antecedents")
 .Input("mention_starts: int32")

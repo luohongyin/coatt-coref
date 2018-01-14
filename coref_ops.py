@@ -6,6 +6,9 @@ coref_op_library = tf.load_op_library("./coref_kernels.so")
 spans = coref_op_library.spans
 tf.NotDifferentiable("Spans")
 
+memory = coref_op_library.memory
+tf.NotDifferentiable("Memory")
+
 antecedents = coref_op_library.antecedents
 tf.NotDifferentiable("Antecedents")
 

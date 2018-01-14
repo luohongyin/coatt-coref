@@ -130,6 +130,26 @@ def ffnn(inputs, num_hidden_layers, hidden_size, output_size, dropout, output_we
     raise ValueError("FFNN with rank {} not supported".format(len(inputs.get_shape())))
   return outputs
 
+
+def cnn_name(inputs, filter_sizes, num_filters, name):
+  num_words = shape(inputs, 0)
+  num_chars = shape(inputs, 1)
+  input_size = shape(inputs, 2)
+  outputs = []
+  for i, filter_size in enumerate(filter_sizes):
+    with tf.variable_scope("conv_{}_{}".format(i, name)):
+      w = tf.get_variable("w", [filter_size, input_size, num_filters])
+      b = tf.get_variable("b", [num_filters])
+    conv = tf.nn.conv1d(inputs, w, stride=1, padding="SAME") # [num_words, num_chars - filter_size, num_filters]
+    h = tf.nn.relu(tf.nn.bias_add(conv, b)) # [num_words, num_chars - filter_size, num_filters]
+    # pooled = tf.reduce_max(h, 1) # [num_words, num_filters]
+    outputs.append(h)
+  return tf.concat(outputs, 1) # [num_words, num_filters * len(filter_sizes)]
+
+def one_hot(x, y):
+  x[int(y)] = 1
+  return list(x)
+
 def cnn(inputs, filter_sizes, num_filters):
   num_words = shape(inputs, 0)
   num_chars = shape(inputs, 1)

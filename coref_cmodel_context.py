@@ -214,11 +214,14 @@ class CorefModel(object):
     mention_end_emb = tf.gather(text_outputs, mention_ends) # [num_mentions, emb]
     mention_speaker_ids = tf.gather(speaker_ids, mention_starts) # [num_mentions]
 
-    context_starts = tf.maximum(mention_starts - 5, 0)
-    context_ends = tf.minimum(mention_ends + 5, util.shape(text_outputs, 0) - 1)
+    context_pre_starts = tf.maximum(mention_starts - 5, 0)
+    context_pos_ends = tf.minimum(mention_ends + 5, util.shape(text_outputs, 0) - 1)
 
-    context_start_emb = tf.gather(text_outputs, context_starts) # [num_mentions, emb]
-    context_end_emb = tf.gather(text_outputs, context_ends) # [num_mentions, emb]
+    # context_pre_width = mention_starts - context_pre_starts
+    # context_pos_width = context_pos_ends - mention_ends
+
+    # context_start_emb = tf.gather(text_outputs, context_starts) # [num_mentions, emb]
+    # context_end_emb = tf.gather(text_outputs, context_ends) # [num_mentions, emb]
 
     max_antecedents = self.config["max_antecedents"]
     antecedents, antecedent_labels, antecedents_len = coref_ops.antecedents(mention_starts,
@@ -239,8 +242,8 @@ class CorefModel(object):
                                                     mention_ends,
                                                     mention_speaker_ids,
                                                     genre_emb,
-                                                    context_starts,
-                                                    context_ends,
+                                                    context_pre_starts,
+                                                    context_pos_ends,
                                                     text_outputs,
                                                     flattened_text_emb) # [num_mentions, max_ant + 1]
 
@@ -266,8 +269,8 @@ class CorefModel(object):
                                     mention_ends,
                                     mention_speaker_ids,
                                     genre_emb,
-                                    context_starts,
-                                    context_ends,
+                                    context_pre_starts,
+                                    context_pos_ends,
                                     text_outputs,
                                     text_emb):
     num_mentions = util.shape(mention_emb, 0)
@@ -329,13 +332,26 @@ class CorefModel(object):
 
     ####### Context Level #######
 
-    context_start_emb = tf.gather(text_outputs, context_starts)
-    context_end_emb = tf.gather(text_outputs, context_ends)
+    context_pre_ends = mention_starts - 1
+    context_pos_starts = mention_ends + 1
 
-    context_width = 1 + context_ends - context_starts
-    context_indices = tf.expand_dims(tf.range(self.config["max_context_width"]), 0) + tf.expand_dims(context_starts, 1) # [num_mentions, max_mention_width]
-    context_indices = tf.minimum(util.shape(text_outputs, 0) - 1, context_indices) # [num_mentions, max_mention_width]
-    context_mask = tf.expand_dims(tf.sequence_mask(context_width, self.config["max_context_width"], dtype=tf.float32), 2) # [num_mentions, max_mention_width, 1]
+    context_pre_width = mention_starts - context_pre_starts
+    context_pos_width = context_pos_ends - mention_ends
+
+    context_start_emb = tf.gather(text_outputs, context_pre_starts)
+    context_end_emb = tf.gather(text_outputs, context_pos_ends)
+
+    # context_width = 1 + context_ends - context_starts
+    context_pre_indices = tf.expand_dims(tf.range(self.config["max_context_width"] / 2), 0) + tf.expand_dims(context_pre_starts, 1) # [num_mentions, max_mention_width]
+    context_pre_indices = tf.minimum(util.shape(text_outputs, 0) - 1, context_pre_indices) # [num_mentions, max_mention_width]
+    context_pre_mask = tf.expand_dims(tf.sequence_mask(context_pre_width, self.config["max_context_width"] / 2, dtype=tf.float32), 2) # [num_mentions, max_mention_width, 1]
+
+    context_pos_indices = tf.expand_dims(tf.range(self.config["max_context_width"] / 2), 0) + tf.expand_dims(context_pos_starts, 1) # [num_mentions, max_mention_width]
+    context_pos_indices = tf.minimum(util.shape(text_outputs, 0) - 1, context_pos_indices) # [num_mentions, max_mention_width]
+    context_pos_mask = tf.expand_dims(tf.sequence_mask(context_pos_width, self.config["max_context_width"] / 2, dtype=tf.float32), 2) # [num_mentions, max_mention_width, 1]
+
+    context_indices = tf.concat([context_pre_indices, context_pos_indices], 1)
+    context_mask = tf.concat([context_pre_mask, context_pos_mask], 1)
 
     antecedent_context_indices = tf.gather(context_indices, antecedents)
     antecedent_context_mask = tf.gather(context_mask, antecedents)
@@ -349,14 +365,20 @@ class CorefModel(object):
     #### Initial Embeddings #####
     
     antecedent_emb = tf.gather(mention_emb, antecedents) # [num_mentions, max_ant, emb]
-    target_emb_tiled = tf.tile(tf.expand_dims(mention_emb, 1), [1, max_antecedents, 1]) # [num_mentions, max_ant, emb]
+    antecedent_emb_score = util.projection_name(antecedent_emb, 1, 't_score')
+    # target_emb_tiled = tf.tile(tf.expand_dims(mention_emb, 1), [1, max_antecedents, 1]) # [num_mentions, max_ant, emb]
+    target_emb_score = util.projection_name(mention_emb, 1, 't_score')
+    target_emb_score = tf.tile(tf.expand_dims(target_emb_score, 1), [1, max_antecedents, 1])
     
     context_emb = tf.concat([context_start_emb, context_end_emb], 1)
 
     antecedent_context_emb = tf.gather(context_emb, antecedents) # [num_mentions, max_ant, emb]
-    target_context_emb_tiled = tf.tile(tf.expand_dims(context_emb, 1), [1, max_antecedents, 1]) # [num_mentions, max_ant, emb]
+    antecedent_context_score = util.projection_name(antecedent_context_emb, 1, 'c_score')
+    # target_context_emb_tiled = tf.tile(tf.expand_dims(context_emb, 1), [1, max_antecedents, 1]) # [num_mentions, max_ant, emb]
+    target_context_score = util.projection_name(context_emb, 1, 'c_score')
+    target_context_score = tf.tile(tf.expand_dims(target_context_score, 1), [1, max_antecedents, 1])
 
-    similarity_emb = antecedent_emb * target_emb_tiled # [num_mentions, max_ant, emb]
+    # similarity_emb = antecedent_emb * target_emb_tiled # [num_mentions, max_ant, emb]
     
 
     #############################
@@ -368,27 +390,32 @@ class CorefModel(object):
 
     ###### C_a Attention ########
 
-    window_emb = tf.concat([antecedent_emb, target_emb_tiled, target_context_emb_tiled], 2)
-    window_scores = util.projection_name(window_emb, 100, 'c_a_window')
+    # window_emb = tf.concat([antecedent_emb, target_emb_tiled, target_context_emb_tiled], 2)
+    window_scores = antecedent_emb_score + target_emb_score + target_context_score
+    # window_scores = util.ffnn_name(window_emb, 1, 100, 1, 'c_a_window', self.dropout)
     window_scores = tf.tile(tf.expand_dims(window_scores, 2), [1, 1, self.config['max_context_width'], 1])
 
-    target_scores = util.projection_name(antecedent_context_indices_emb, 100, 'c_a_target')
+    target_scores = util.projection_name(antecedent_context_indices_emb, 1, 'context_att')
+    # target_scores = util.ffnn_name(antecedent_context_indices_emb, 1, 100, 1, 'c_a_target', self.dropout)
 
-    temp_scores = util.projection_name(window_scores + target_scores, 1, 'att_score')
+    temp_scores = window_scores + target_scores
 
     temp_att = tf.nn.softmax(temp_scores + tf.log(antecedent_context_mask), dim=2) # [num_mentions, max_mention_width, 1]
     antecedent_context_emb = tf.reduce_sum(temp_att * tf.gather(text_emb, antecedent_context_indices), 2)
 
 
+
     ###### C_t Attention ########
 
-    window_emb = tf.concat([antecedent_emb, target_emb_tiled, antecedent_context_emb], 2)
-    window_scores = util.projection_name(window_emb, 100, 'c_t_window')
+    # window_emb = tf.concat([antecedent_emb, target_emb_tiled, antecedent_context_emb], 2)
+    window_scores = antecedent_emb_score + target_emb_score + antecedent_context_score
+    # window_scores = util.ffnn_name(window_emb, 1, 100, 1, 'c_t_window', self.dropout)
     window_scores = tf.tile(tf.expand_dims(window_scores, 2), [1, 1, self.config['max_context_width'], 1])
 
-    target_scores = util.projection_name(target_context_indices_emb, 100, 'c_t_target')
+    target_scores = util.projection_name(target_context_indices_emb, 1, 'context_att')
+    # target_scores = util.ffnn_name(target_context_indices_emb, 1, 100, 1, 'c_t_target', self.dropout)
 
-    temp_scores = util.projection_name(window_scores + target_scores, 1, 'att_score') 
+    temp_scores = window_scores + target_scores
 
     temp_att = tf.nn.softmax(temp_scores + tf.log(target_context_mask), dim=2) # [num_mentions, max_mention_width, 1]
     target_context_emb_tiled = tf.reduce_sum(temp_att * tf.gather(text_emb, target_context_indices), 2)
@@ -396,13 +423,15 @@ class CorefModel(object):
     
     ###### M_t Attention ########
 
-    window_emb = tf.concat([antecedent_emb, antecedent_context_emb, target_context_emb_tiled], 2)
-    window_scores = util.projection_name(window_emb, 100, 'm_t_window')
+    # window_emb = tf.concat([antecedent_emb, antecedent_context_emb, target_context_emb_tiled], 2)
+    window_scores = antecedent_emb_score + antecedent_context_score + target_context_score
+    # window_scores = util.ffnn_name(window_emb, 1, 100, 1, 'm_t_window', self.dropout)
     window_scores = tf.tile(tf.expand_dims(window_scores, 2), [1, 1, self.config['max_mention_width'], 1])
 
-    target_scores = util.projection_name(target_indices_emb, 100, 'm_t_target')
+    target_scores = util.projection_name(target_indices_emb, 1, 'mention_att')
+    # target_scores = util.ffnn_name(target_indices_emb, 1, 100, 1, 'm_t_target', self.dropout)
 
-    temp_scores = util.projection_name(window_scores + target_scores, 1, 'att_score')
+    temp_scores = window_scores + target_scores
     
     temp_att = tf.nn.softmax(temp_scores + tf.log(target_mask), dim=2) # [num_mentions, max_mention_width, 1]
     target_emb_tiled = tf.reduce_sum(temp_att * tf.gather(text_emb, target_indices), 2)
@@ -410,13 +439,16 @@ class CorefModel(object):
 
     ###### M_a Attention ########
 
-    window_emb = tf.concat([target_emb_tiled, target_context_emb_tiled, antecedent_context_emb], 2)
-    window_scores = util.projection_name(window_emb, 100, 'm_a_window')
+    # window_emb = tf.concat([target_emb_tiled, target_context_emb_tiled, antecedent_context_emb], 2)
+    # window_scores = util.projection_name(target_emb_tiled, 1, 'm_a_window')
+    window_scores = target_emb_score + target_context_score + antecedent_context_score
+    # window_scores = util.ffnn_name(window_emb, 1, 100, 1, 'm_a_window', self.dropout)
     window_scores = tf.tile(tf.expand_dims(window_scores, 2), [1, 1, self.config['max_mention_width'], 1])
 
-    target_scores = util.projection_name(antecedent_indices_emb, 100, 'm_a_target')
+    target_scores = util.projection_name(antecedent_indices_emb, 1, 'mention_att')
+    # target_scores = util.ffnn_name(target_indices_emb, 1, 100, 1, 'm_a_target', self.dropout)
 
-    temp_scores = util.projection_name(window_scores + target_scores, 1, 'att_score')
+    temp_scores = window_scores + target_scores
   
     temp_att = tf.nn.softmax(temp_scores + tf.log(antecedent_mask), dim=2) # [num_mentions, max_mention_width, 1]
     antecedent_emb = tf.reduce_sum(temp_att * tf.gather(text_emb, antecedent_indices), 2)
@@ -430,7 +462,7 @@ class CorefModel(object):
 
     antecedent_feature = tf.gather(mention_features, antecedents) # [num_mentions, max_ant, emb]
     target_feature = tf.tile(tf.expand_dims(mention_features, 1), [1, max_antecedents, 1]) # [num_mentions, max_ant, emb]
-    # similarity_emb = antecedent_emb * target_emb_tiled # [num_mentions, max_ant, emb]
+    similarity_emb = antecedent_emb * target_emb_tiled # [num_mentions, max_ant, emb]
 
     # pair_emb = tf.concat([target_emb_tiled_1, antecedent_emb_1, similarity_emb, feature_emb], 2) # [num_mentions, max_ant, emb]
 
