@@ -149,18 +149,7 @@ class CorefModel(object):
                                   tag_labels)
     else:
     '''
-    return word_emb,
-          char_index,
-          text_len,
-          speaker_ids,
-          genre,
-          is_training,
-          gold_starts,
-          gold_ends,
-          cluster_ids,
-          tag_labels,
-          tag_seq,
-          tag_loss_label
+    return word_emb, char_index, text_len, speaker_ids, genre, is_training, gold_starts, gold_ends, cluster_ids, tag_labels, tag_seq, tag_loss_label
 
   def truncate_example(self,
                       word_emb,
