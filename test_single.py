@@ -9,7 +9,7 @@ import random
 
 import numpy as np
 import tensorflow as tf
-import coref_model_memnn as cm
+import coref_model_memnn_cnn3 as cm
 import util
 
 if __name__ == "__main__":
