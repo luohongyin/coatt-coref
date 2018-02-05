@@ -63,9 +63,9 @@ if __name__ == "__main__":
                                                             model.gold_starts])
       acc_mention_loss += mention_loss
       acc_tagging_loss += tagging_loss
-      # print cluster_ids
-      # print gs
-      # print x + 1
+      print cluster_ids
+      print gs
+      print x + 1
 
       if tf_global_step % report_frequency == 0:
         total_time = time.time() - initial_time
