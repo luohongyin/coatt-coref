@@ -340,6 +340,7 @@ class CorefModel(object):
 
     # Transpose before and after for efficiency.
     inputs = tf.transpose(text_emb, [1, 0, 2]) # [max_sentence_length, num_sentences, emb]
+    # inputs = tf.unstack(inputs, axis = 0)
 
     with tf.variable_scope("fw_cell"):
       cell_fw = util.CustomLSTMCell(self.config["lstm_size"], num_sentences, self.dropout)

@@ -255,3 +255,90 @@ class CustomLSTMCell(tf.contrib.rnn.RNNCell):
       params = np.concatenate([initializer([shape[0], o], dtype, partition_info) for o in output_sizes], 1)
       return params
     return _initializer
+
+
+class RecurrentMemNNCell(tf.contrib.rnn.RNNCell):
+  def __init__(self, num_units, batch_size, dropout, tag_labels, tag_seq, training=True):
+    self._tag_labels = tag_labels
+    self.tag_seq = tag_seq
+    self._training = training
+    self._num_units = num_units
+    self._dropout = dropout
+
+    self._dropout_mask = tf.nn.dropout(tf.ones([batch_size, self.output_size]), dropout)
+    self._initializer = self._block_orthonormal_initializer([self.output_size] * 3)
+
+    initial_cell_state = tf.get_variable("lstm_initial_cell_state", [1, self.output_size])
+    initial_hidden_state = tf.get_variable("lstm_initial_hidden_state", [1, self.output_size])
+    self._initial_state = tf.contrib.rnn.LSTMStateTuple(initial_cell_state, initial_hidden_state)
+
+    basic_tag = tf.get_variable("basic_tag_emb", [2, self.output_size])
+    new_entity_tag = tf.zeros("new_entity_emb", [1, self.output_size])
+    self.initial_entity_emb = tf.concat([basic_tag, new_entity_tag], 0)
+
+    self.init_word_emb = tf.get_variable("init_word_emb", [1, 3 * self.output_size])
+
+    self.word_index = 0
+
+  @property
+  def state_size(self):
+    return tf.contrib.rnn.LSTMStateTuple(self.output_size, self.output_size)
+
+  @property
+  def output_size(self):
+    return self._num_units
+
+  @property
+  def initial_state(self):
+    self.word_index = 0
+    return self._initial_state
+  
+  def evaluating(self):
+    self._training = False
+
+  def preprocess_input(self, inputs):
+    num_words = tf.shape(inputs)[0] + 1
+    self.seq_emb = tf.concat([self.init_word_emb, inputs], 0)
+    word_mask = np.zeros((1, num_words))
+    # self.word_mask[1][0] = 1
+    self.tf_word_mask = tf.Variable(self.word_mask)
+    return projection(inputs, 3 * self.output_size)
+
+  def __call__(self, inputs, state, scope=None):
+    """Long short-term memory cell (LSTM)."""
+    with tf.variable_scope(scope or type(self).__name__):  # "RecurrentMemNNCell"
+      self.tf_word_index = tf.one_hot([self.word_index])
+      self.tf_word_mask += self.tf_word_index
+      self.word_index += 1
+      c, h = state
+      h *= self._dropout_mask
+      projected_h = projection(h, 3 * self.output_size, initializer=self._initializer)
+      concat = inputs + projected_h
+      i, j, o = tf.split(concat, num_or_size_splits=3, axis=1)
+      i = tf.sigmoid(i)
+      new_c = (1 - i) * c  + i * tf.tanh(j)
+      new_h = tf.tanh(new_c) * tf.sigmoid(o)
+      new_state = tf.contrib.rnn.LSTMStateTuple(new_c, new_h)
+      return new_h, new_state
+
+  def _orthonormal_initializer(self, scale=1.0):
+    def _initializer(shape, dtype=tf.float32, partition_info=None):
+      M1 = np.random.randn(shape[0], shape[0]).astype(np.float32)
+      M2 = np.random.randn(shape[1], shape[1]).astype(np.float32)
+      Q1, R1 = np.linalg.qr(M1)
+      Q2, R2 = np.linalg.qr(M2)
+      Q1 = Q1 * np.sign(np.diag(R1))
+      Q2 = Q2 * np.sign(np.diag(R2))
+      n_min = min(shape[0], shape[1])
+      params = np.dot(Q1[:, :n_min], Q2[:n_min, :]) * scale
+      return params
+    return _initializer
+
+  def _block_orthonormal_initializer(self, output_sizes):
+    def _initializer(shape, dtype=np.float32, partition_info=None):
+      assert len(shape) == 2
+      assert sum(output_sizes) == shape[1]
+      initializer = self._orthonormal_initializer()
+      params = np.concatenate([initializer([shape[0], o], dtype, partition_info) for o in output_sizes], 1)
+      return params
+    return _initializer
