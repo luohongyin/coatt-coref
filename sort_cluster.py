@@ -2,7 +2,7 @@ import sys
 import json
 
 def list_min(l):
-    return min([item for sublist in l for item in sublist])
+    return min([item[0] for item in l])
 
 def sort_cluster(line):
     example = json.loads(line)

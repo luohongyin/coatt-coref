@@ -270,16 +270,24 @@ class RecurrentMemNNCell(tf.contrib.rnn.RNNCell):
     self._dropout_mask = tf.nn.dropout(tf.ones([batch_size, self.output_size]), dropout)
     self._initializer = self._block_orthonormal_initializer([100])
 
-    initial_cell_state = tf.constant([[0.0, 2.0]], name="lstm_initial_cell_state")
+    initial_indexes = tf.constant([[0.0, 2.0]], name="initial_indexes")
+    # initial_memory = tf.zeros_like(tf.variable([1, 20000], trainable=False))
+
+    basic_tag = tf.get_variable("basic_tag_emb", [2, self.hidden_size])
+    new_entity_tag = tf.zeros([98, self.hidden_size], name="new_entity_emb")
+    entity_emb = tf.concat([basic_tag, new_entity_tag], 0)
+
+    initial_memory = tf.reshape(entity_emb, [1, 20000])
+
+    initial_cell_state = tf.concat([initial_indexes, initial_memory], 1)
+    initial_cell_state = tf.reshape(initial_cell_state, [1, 20002])
+
+    # initial_cell_state = tf.constant([[0.0, 2.0]], name="lstm_initial_cell_state")
     initial_hidden_state = tf.get_variable("lstm_initial_hidden_state", [1, 100])
     self._initial_state = tf.contrib.rnn.LSTMStateTuple(initial_cell_state, initial_hidden_state)
 
     self.word_index_update = tf.constant([[1.0, 0.0]])
     self.entity_index_update = tf.constant([[0.0, 1.0]])
-
-    self.basic_tag = tf.get_variable("basic_tag_emb", [2, self.hidden_size])
-    self.new_entity_tag = tf.zeros([98, self.hidden_size], name="new_entity_emb")
-    self.entity_emb = tf.concat([self.basic_tag, self.new_entity_tag], 0)
 
     self.init_word_emb = tf.get_variable("init_word_emb", [1, self.hidden_size])
 
@@ -289,7 +297,7 @@ class RecurrentMemNNCell(tf.contrib.rnn.RNNCell):
 
   @property
   def state_size(self):
-    return tf.contrib.rnn.LSTMStateTuple(self.output_size, self.output_size)
+    return tf.contrib.rnn.LSTMStateTuple(20002, self.output_size)
 
   @property
   def output_size(self):
@@ -309,14 +317,19 @@ class RecurrentMemNNCell(tf.contrib.rnn.RNNCell):
     self.sentence_emb = tf.nn.tanh(tf.concat([self.init_word_emb, tf.squeeze(input_emb)], 0)) # [num_words, emb]
     self.sentence_head = tf.nn.tanh(tf.transpose(projection_name(self.sentence_emb, self.hidden_size, 'word_memnn')))
 
-    self.entity_emb = tf.concat([self.basic_tag, self.new_entity_tag], 0)
+    # self.entity_emb = tf.concat([self.basic_tag, self.new_entity_tag], 0)
     return input_emb
 
   def __call__(self, inputs, state, scope=None):
     """Long short-term memory cell (LSTM)."""
     with tf.variable_scope(scope or type(self).__name__):  # "RecurrentMemNNCell"
       c, h = state
-      cell = tf.squeeze(c)
+      # x = tf.matmul(c, tf.zeros([5, 5]))
+      raw_cell = tf.reshape(c, [1, 20002])
+      indexes, memories = tf.split(raw_cell, [2, 20000], 1)
+      cell = tf.squeeze(indexes)
+
+      entity_emb = tf.reshape(memories, [100, self.hidden_size])
 
       word_index = tf.cast(tf.gather(cell, [0]), tf.int64)
       entity_index = tf.cast(tf.gather(cell, [1]), tf.int64)
@@ -333,9 +346,9 @@ class RecurrentMemNNCell(tf.contrib.rnn.RNNCell):
       tag_query = tf.nn.tanh(projection_name(tag_query, self.hidden_size, 'tag_query'))
       tag_input = tf.tile(tag_query, [100, 1])
 
-      tag_gate = tf.concat([tag_input, self.entity_emb], 1, name='concat_gate')
+      tag_gate = tf.concat([tag_input, entity_emb], 1, name='concat_gate')
 
-      logits = tf.nn.softmax(tf.matmul(tag_query, tf.transpose(self.entity_emb)) + tf.log(entity_mask))
+      logits = tf.nn.softmax(tf.matmul(tag_query, tf.transpose(entity_emb)) + tf.log(entity_mask))
       self.prediction = tf.argmax(logits)
 
       new_entity_query = tf.cond(tf.equal(self.training, 1),
@@ -344,16 +357,19 @@ class RecurrentMemNNCell(tf.contrib.rnn.RNNCell):
       
       new_entity_cond = tf.reshape(tf.equal(new_entity_query, entity_index), [])
 
-      e_update = tf.cond(new_entity_cond, lambda: tf.one_hot([1], 2), lambda: tf.zeros([1, 2]))
+      e_update = tf.cond(new_entity_cond, lambda: self.entity_index_update, lambda: tf.zeros([1, 2]))
 
       write_head = tf.cond(new_entity_cond,
               lambda: tf.one_hot([self.entity_index], self._max_entity),
               lambda: tf.nn.sigmoid(projection_name(tag_gate, 1, 'write_head') * tf.transpose(entity_mask)))
       
-      self.entity_emb = write_head * tag_input + (1 - write_head) * self.entity_emb
+      write_head = tf.reshape(write_head, [100, 1])
+      new_entity_emb = tf.reshape(write_head * tag_input + (1 - write_head) * entity_emb, [1, 20000])
 
       # print 14
-      new_c = c + self.word_index_update + e_update
+      new_indexes = indexes + self.word_index_update + e_update
+
+      new_c = tf.concat([new_indexes, new_entity_emb], 1)
 
       new_state = tf.contrib.rnn.LSTMStateTuple(new_c, logits)
 

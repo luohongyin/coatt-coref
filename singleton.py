@@ -50,12 +50,13 @@ if __name__ == "__main__":
     acc_tagging_loss = 0.0
     initial_time = time.time()
     while not sv.should_stop():
-      loss, tf_global_step, _, x1, x2, x3 = session.run([model.loss,
+      loss, tf_global_step, _, x1, x2, x3, x4 = session.run([model.loss,
                                               model.global_step,
                                               model.train_op,
                                               model.logits_shape,
                                               model.tag_seq,
-                                              model.p])
+                                              model.p,
+                                              model.fw_cell])
       # acc_mention_loss += mention_loss
       acc_tagging_loss += loss
       # print x1
@@ -66,7 +67,7 @@ if __name__ == "__main__":
       # print x + 1
 
       # if tf_global_step % report_frequency == 0:
-      if tf_global_step % 10 == 0:
+      if tf_global_step % 100 == 0:
         total_time = time.time() - initial_time
         steps_per_second = tf_global_step / total_time
 
@@ -78,6 +79,7 @@ if __name__ == "__main__":
         print x1
         print x2
         print x3
+        print x4
 
         writer.add_summary(util.make_summary({"loss": avg_tagging_loss}), tf_global_step)
         # accumulated_loss = 0.0
