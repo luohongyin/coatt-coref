@@ -50,21 +50,29 @@ if __name__ == "__main__":
     acc_tagging_loss = 0.0
     initial_time = time.time()
     while not sv.should_stop():
-      loss, tf_global_step, _, x1, x2, x3, x4 = session.run([model.loss,
+      loss, tf_global_step, _, x1, x2, x3, x4, x5 = session.run([model.loss,
                                               model.global_step,
                                               model.train_op,
                                               model.logits_shape,
-                                              model.tag_seq,
+                                              model.span_seq,
                                               model.p,
-                                              model.fw_cell])
+                                              model.fw_state,
+                                              model.span_labels])
       # acc_mention_loss += mention_loss
       acc_tagging_loss += loss
-      # print x1
-      # print x2
-      # print x3
-      # print cluster_ids
+      '''
+      print '----------------------------'
+      print 'loss = {:.2f}'.format(loss)
+      print x1
+      print x5
+      print max(list(x2))
+      print util.check_tags(list(x2))
+      print list(x3)
+      print x4
+      print '----------------------------'
       # print gs
-      # print x + 1
+      print x + 1
+      # '''
 
       # if tf_global_step % report_frequency == 0:
       if tf_global_step % 100 == 0:
@@ -76,10 +84,16 @@ if __name__ == "__main__":
         print "[{}] tagging_loss={:.2f} steps/s={:.2f}".format(tf_global_step,
                                                             avg_tagging_loss,
                                                             steps_per_second)
+        # '''
+        print '----------------------------'
         print x1
-        print x2
-        print x3
+        print "number of entities:%d" % max(list(x2))
+        print list(x2)
+        print util.check_tags(x2)
+        print list(x3)
         print x4
+        print '----------------------------'
+        # '''
 
         writer.add_summary(util.make_summary({"loss": avg_tagging_loss}), tf_global_step)
         # accumulated_loss = 0.0

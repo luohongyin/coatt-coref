@@ -53,6 +53,93 @@ private:
 
 REGISTER_KERNEL_BUILDER(Name("Spans").Device(DEVICE_CPU), SpansOp);
 
+REGISTER_OP("Regression")
+.Attr("max_width: int")
+.Input("sentence_indices: int32")
+.Output("starts: int32")
+.Output("ends: int32");
+
+class RegressionOp : public OpKernel {
+public:
+  explicit RegressionOp(OpKernelConstruction* context) : OpKernel(context) {
+    OP_REQUIRES_OK(context, context->GetAttr("max_width", &_max_width));
+  }
+
+  void Compute(OpKernelContext* context) override {
+    TTypes<int32>::ConstVec sentence_indices = context->input(0).vec<int32>();
+    int length = sentence_indices.dimension(0);
+
+    std::vector<std::pair<int, int>> spans;
+    for (int i = 0; i < length; ++i) {
+      for (int j = 0; (i - j) >= 0 && j < _max_width; ++j) {
+        if (sentence_indices(i) == sentence_indices(i - j)) {
+          spans.emplace_back(i - j, i); 
+        }
+      }
+    }
+
+    Tensor* starts_tensor = nullptr;
+    Tensor* ends_tensor = nullptr;
+    TensorShape outputs_shape({static_cast<int64>(spans.size())});
+    OP_REQUIRES_OK(context, context->allocate_output(0, outputs_shape, &starts_tensor));
+    OP_REQUIRES_OK(context, context->allocate_output(1, outputs_shape, &ends_tensor));
+    TTypes<int32>::Vec starts = starts_tensor->vec<int32>();
+    TTypes<int32>::Vec ends = ends_tensor->vec<int32>();
+
+    for (int i = 0; i < spans.size(); ++i) {
+      const std::pair<int, int>& span = spans[i];
+      starts(i) = span.first;
+      ends(i) = span.second;
+    }
+  }
+
+private:
+  int _max_width;
+};
+
+REGISTER_KERNEL_BUILDER(Name("Regression").Device(DEVICE_CPU), RegressionOp);
+
+REGISTER_OP("Tagging")
+.Input("raw_tags: int32")
+.Output("flattened_tags: int32");
+
+class TaggingOp : public OpKernel {
+public:
+  explicit TaggingOp(OpKernelConstruction* context) : OpKernel(context) {
+    // OP_REQUIRES_OK(context, context->GetAttr("max_width", &_max_width));
+  }
+
+  void Compute(OpKernelContext* context) override {
+    TTypes<int32>::ConstVec raw_tags = context->input(0).vec<int32>();
+    int length = raw_tags.dimension(0);
+    int num_entity = 0;
+    int current_high = 0;
+
+    Tensor* flattened_tags_tensor = nullptr;
+    TensorShape outputs_shape({static_cast<int64>(length)});
+    OP_REQUIRES_OK(context, context->allocate_output(0, outputs_shape, &flattened_tags_tensor));
+    TTypes<int32>::Vec flattened_tags = flattened_tags_tensor->vec<int32>();
+
+    std::map<int, int> tag_dict;
+
+    for (int i = 0; i < length; i++) {
+      if (raw_tags(i) == 0) flattened_tags(i) = 0;
+      else if (raw_tags(i) > current_high) {
+        current_high = raw_tags(i);
+        num_entity += 1;
+        tag_dict[raw_tags(i)] = num_entity;
+        flattened_tags(i) = num_entity;
+      }
+      else flattened_tags(i) = tag_dict[raw_tags(i)];
+    }
+  }
+
+private:
+  // int _max_width;
+};
+
+REGISTER_KERNEL_BUILDER(Name("Tagging").Device(DEVICE_CPU), TaggingOp);
+
 REGISTER_OP("Memory")
 .Attr("num_words: int")
 .Input("tag_seq: int32")

@@ -33,9 +33,10 @@ class CorefModel(object):
     input_props.append((tf.int32, [None])) # Gold starts.
     input_props.append((tf.int32, [None])) # Gold ends.
     input_props.append((tf.int32, [None])) # Cluster ids.
-    input_props.append((tf.int32, [None, 100])) # Tagging labels.
-    input_props.append((tf.int32, [None])) # Tagging sequence
-    input_props.append((tf.int32, [None])) # Tagging loss label sequence
+    input_props.append((tf.int32, [None, 100])) # Span labels.
+    input_props.append((tf.int32, [None])) # Span sequence.
+    # input_props.append((tf.int32, [None])) # Tagging sequence
+    # input_props.append((tf.int32, [None])) # Tagging loss label sequence
 
     self.queue_input_tensors = [tf.placeholder(dtype, shape) for dtype, shape in input_props]
     dtypes, shapes = zip(*input_props)
@@ -72,29 +73,18 @@ class CorefModel(object):
       enqueue_thread.daemon = True
       enqueue_thread.start()
 
-  def tensorize_mentions(self, mentions, num_words, cluster_ids):
+  def tensorize_mentions(self, mentions, num_words, cluster_ids, span_seq):
     if len(mentions) > 0:
       starts, ends = zip(*mentions)
     else:
       starts, ends = [], []
-    tag_labels = np.zeros((num_words, 100))
-    tag_seq = np.zeros(num_words)
-    tag_loss_label = np.zeros(num_words)
-    for i, indexes in enumerate(zip(starts, ends)):
-      s, e = indexes
-      tag_seq[s:e + 1] = np.ones(e - s + 1)
-      tag_seq[s] = cluster_ids[i] + 2
-      if e < num_words - 1:
-        span_end = e + 2
-        tag_loss_label[s:span_end] = np.ones(span_end - s)
-        tag_loss_label[s] = 1
-        tag_loss_label[span_end - 1] = 1
-
-    tag_labels = [util.one_hot(x, y) for x, y in zip(tag_labels, tag_seq)]
-    return np.array(starts), np.array(ends), np.array(tag_labels), tag_seq, tag_loss_label
+    # num_spans = span_seq.shape[0]
+    span_labels = np.array([util.one_hot([0] * 100, x) for x in span_seq])
+    return np.array(starts), np.array(ends), span_labels
 
   def tensorize_example(self, example, is_training, oov_counts=None):
     clusters = example["clusters"]
+    span_seq = np.array(example["span_labels"])
 
     gold_mentions = sorted(tuple(m) for m in util.flatten(clusters))
     gold_mention_map = {m:i for i,m in enumerate(gold_mentions)}
@@ -134,7 +124,7 @@ class CorefModel(object):
     doc_key = example["doc_key"]
     genre = self.genres[doc_key[:2]]
 
-    gold_starts, gold_ends, tag_labels, tag_seq, tag_loss_label = self.tensorize_mentions(gold_mentions, num_words, cluster_ids)
+    gold_starts, gold_ends, span_labels = self.tensorize_mentions(gold_mentions, num_words, cluster_ids, span_seq)
 
     '''
     if is_training and len(sentences) > self.config["max_training_sentences"]:
@@ -150,7 +140,7 @@ class CorefModel(object):
                                   tag_labels)
     else:
     '''
-    return word_emb, char_index, text_len, speaker_ids, genre, is_training, gold_starts, gold_ends, cluster_ids, tag_labels, tag_seq, tag_loss_label
+    return word_emb, char_index, text_len, speaker_ids, genre, is_training, gold_starts, gold_ends, cluster_ids, span_labels, span_seq
 
   def truncate_example(self,
                       word_emb,
@@ -205,13 +195,17 @@ class CorefModel(object):
                               gold_starts,
                               gold_ends,
                               cluster_ids,
-                              tag_labels,
-                              tag_seq,
-                              tag_loss_label):
+                              span_labels,
+                              span_seq):
 
     self.gold_starts = gold_starts
     # self.gold_ends = gold_ends
     self.cluster_ids = cluster_ids
+    # self.span_labels = span_labels
+    # self.span_seq = span_seq
+
+    span_seq_bin = tf.where(tf.greater(span_seq, 0), tf.ones_like(span_seq), tf.zeros_like(span_seq))
+    span_labels_bin = tf.one_hot(span_seq_bin, 2) # [num_mention, 2]
 
     self.dropout = 1 - (tf.to_float(is_training) * self.config["dropout_rate"])
     self.lexical_dropout = 1 - (tf.to_float(is_training) * self.config["lexical_dropout_rate"])
@@ -245,24 +239,77 @@ class CorefModel(object):
     flattened_text_emb = self.flatten_emb_by_sentence(text_emb, text_len_mask) # [num_words]
     self.flattened_sentence_indices = flattened_sentence_indices
 
-    # text_conv = tf.expand_dims(text_outputs, 0)
-    text_conv = tf.expand_dims(tf.concat([text_outputs, flattened_text_emb], 1), 0)
-    text_conv = util.cnn_name(text_conv, [5], 100, 'tag_conv')
-    text_conv = tf.nn.dropout(text_conv, self.dropout)
+    candidate_starts, candidate_ends = coref_ops.regression(
+      sentence_indices=flattened_sentence_indices,
+      max_width=self.max_mention_width)
+    candidate_starts.set_shape([None])
+    candidate_ends.set_shape([None])
 
-    logits = self.gnc_tagging(text_conv, tag_labels, tag_seq) # [1, num_words, 100] ?
+    candidate_mention_emb = self.get_mention_emb(flattened_text_emb, text_outputs, candidate_starts, candidate_ends) # [num_candidates, emb]
+    candidate_mention_logits =  self.get_mention_scores(candidate_mention_emb) # [num_mentions, 2]
+
+    # mention_loss = tf.losses.softmax_cross_entropy(span_labels_bin, candidate_mention_logits)
+    mention_loss = tf.nn.softmax_cross_entropy_with_logits(logits=candidate_mention_logits,
+                                                          labels=span_labels_bin)
+    
+    mention_loss = tf.reduce_sum(mention_loss * tf.cast(span_seq_bin, tf.float32))
+    # mention_loss = tf.reduce_sum(mention_loss * tf.cast(span_seq_bin, tf.float32))
+
+    candidate_mention_scores = tf.squeeze(tf.gather(tf.transpose(candidate_mention_logits), 1))
+    
+    # candidate_mention_scores = tf.squeeze(candidate_mention_scores, 1) # [num_mentions]
+
+    k = tf.to_int32(tf.floor(tf.to_float(tf.shape(text_outputs)[0]) * self.config["mention_ratio"]))
+    predicted_mention_indices = coref_ops.extract_mentions(candidate_mention_scores, candidate_starts, candidate_ends, k) # ([k], [k])
+    predicted_mention_indices.set_shape([None])
+
+    mention_starts = tf.gather(candidate_starts, predicted_mention_indices) # [num_mentions]
+    mention_ends = tf.gather(candidate_ends, predicted_mention_indices) # [num_mentions]
+    mention_emb = tf.gather(candidate_mention_emb, predicted_mention_indices) # [num_mentions, emb]
+    mention_scores = tf.gather(candidate_mention_scores, predicted_mention_indices) # [num_mentions, 1]
+
+    # mention_loss = tf.losses.softmax_cross_entropy(span_labels_bin, mention_logits)
+    # mention_scores = tf.squeeze(tf.gather(tf.transpose(mention_logits), 1))
+
+    span_emb = tf.expand_dims(mention_emb, 0)
+    # span_labels = tf.gather(span_labels, predicted_mention_indices)
+    span_seq_sorted = coref_ops.tagging(tf.gather(span_seq, predicted_mention_indices))
+    span_labels = tf.one_hot(span_seq_sorted, 100)
+
+    self.span_labels = tf.reduce_sum(span_labels)
+    self.span_seq = span_seq_sorted
+
+    # text_conv = tf.expand_dims(text_outputs, 0)
+    # text_conv = tf.expand_dims(tf.concat([text_outputs, flattened_text_emb], 1), 0)
+    # text_conv = util.cnn_name(text_conv, [5], 100, 'tag_conv')
+    # text_conv = tf.nn.dropout(text_conv, self.dropout)
+
+    logits = self.gnc_tagging(span_emb, span_labels, span_seq_sorted, mention_scores) # [1, num_words, 100] ?
     self.logits_shape = tf.shape(logits)
 
     predictions = tf.argmax(logits, axis=2) # [1, num_words] ?
 
-    loss = tf.nn.softmax_cross_entropy_with_logits(logits=logits, labels=tag_labels)
-    self.tag_seq = tag_seq
+    # loss = tf.losses.softmax_cross_entropy(span_labels, tf.squeeze(logits))
+    # span_seq_expanded = tf.expand_dims(span_seq_sorted, 0)
+    # loss = tf.contrib.seq2seq.sequence_loss(span_seq_expanded, logits, tf.ones_like(span_seq_expanded))
+    # loss = tf.losses.log_loss(span_labels, tf.squeeze(logits))
+    # self.tag_seq = tag_seq
+    loss = self.tagging_loss(tf.squeeze(logits), span_labels)
+    # loss = tf.squeeze(logits) - span_labels
+    loss = tf.reduce_sum(loss) + 100 * mention_loss
+    
     self.p = predictions
 
     return predictions, loss
     # return predictions, tf.reduce_sum(tf.multiply(tf.to_float(tag_loss_label), loss))
   
-  def gnc_tagging(self, text_emb, tag_labels, tag_seq):
+  def tagging_loss(self, logits, span_labels):
+    gold_scores = logits + tf.log(tf.to_float(span_labels))
+    marginalized_gold_scores = tf.reduce_logsumexp(gold_scores, [1])
+    log_norm = tf.reduce_logsumexp(logits, [1])
+    return log_norm - marginalized_gold_scores
+  
+  def gnc_tagging(self, text_emb, span_labels, span_seq, mention_scores):
     num_sentences = tf.shape(text_emb)[0]
     max_sentence_length = tf.gather(tf.shape(text_emb), [1])
 
@@ -270,12 +317,12 @@ class CorefModel(object):
     inputs = tf.transpose(text_emb, [1, 0, 2]) # [max_sentence_length, num_sentences, emb]
 
     with tf.variable_scope("gnc_cell"):
-      self.cell_fw = util.RecurrentMemNNCell(self.config["lstm_size"], num_sentences, self.dropout, tag_labels, tag_seq, 1)
-      preprocessed_inputs_fw = self.cell_fw.preprocess_input(inputs)
+      self.cell_fw = util.RecurrentMemNNCell(self.config["lstm_size"], num_sentences, self.dropout, span_labels, span_seq, 1)
+      preprocessed_inputs_fw = self.cell_fw.preprocess_input(inputs, mention_scores)
     state_fw = tf.contrib.rnn.LSTMStateTuple(tf.tile(self.cell_fw.initial_state.c, [num_sentences, 1]), tf.tile(self.cell_fw.initial_state.h, [num_sentences, 1]))
     with tf.variable_scope("gnc"):
       with tf.variable_scope("fw_gnc"):
-        fw_outputs, _ = tf.nn.dynamic_rnn(cell=self.cell_fw,
+        fw_outputs, self.fw_state = tf.nn.dynamic_rnn(cell=self.cell_fw,
                                         inputs=preprocessed_inputs_fw,
                                         sequence_length=max_sentence_length,
                                         initial_state=state_fw,
@@ -328,7 +375,7 @@ class CorefModel(object):
 
   def get_mention_scores(self, mention_emb):
     with tf.variable_scope("mention_scores"):
-      return util.ffnn(mention_emb, self.config["ffnn_depth"], self.config["ffnn_size"], 1, self.dropout) # [num_mentions, 1]
+      return util.ffnn(mention_emb, self.config["ffnn_depth"], self.config["ffnn_size"], 2, self.dropout) # [num_mentions, 2]
 
   def softmax_loss(self, antecedent_scores, antecedent_labels):
     gold_scores = antecedent_scores + tf.log(tf.to_float(antecedent_labels)) # [num_mentions, max_ant + 1]
