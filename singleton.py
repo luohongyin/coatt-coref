@@ -28,7 +28,7 @@ if __name__ == "__main__":
   # else:
   #   util.set_gpus([0])
 
-  model = cm.CorefModel(config)
+  model = cm.CorefModel(config, 1)
   saver = tf.train.Saver()
   init_op = tf.global_variables_initializer()
 
@@ -44,38 +44,46 @@ if __name__ == "__main__":
 
   # The supervisor takes care of session initialization, restoring from
   # a checkpoint, and closing when done or an error occurs.
+  ii = 0
   with sv.managed_session() as session:
     model.start_enqueue_thread(session)
     # acc_mention_loss = 0.0
     acc_tagging_loss = 0.0
     initial_time = time.time()
     while not sv.should_stop():
-      loss, tf_global_step, _, x1, x2, x3, x4, x5 = session.run([model.loss,
+      loss, tf_global_step, _, x1, x2, x3, x4, x5, x6, x7, x8, x9 = session.run([model.loss,
                                               model.global_step,
                                               model.train_op,
                                               model.logits_shape,
                                               model.span_seq,
                                               model.p,
                                               model.fw_state,
-                                              model.span_labels])
+                                              model.span_labels,
+                                              model.tagging_loss,
+                                              model.mention_loss,
+                                              model.antecedent_loss,
+                                              model.antecedent_scores_shape])
       # acc_mention_loss += mention_loss
       acc_tagging_loss += loss
       '''
+      ii += 1
       print '----------------------------'
-      print 'loss = {:.2f}'.format(loss)
       print x1
-      print x5
-      print max(list(x2))
-      print util.check_tags(list(x2))
+      print "number of entities:%d" % max(list(x2))
+      print "tagging_loss:%f, mention_loss:%f, antecedent_loss:%f" % (x6, x7, x8)
+      print list(x2)
+      print util.check_tags(x2)
       print list(x3)
       print x4
+      print x9
       print '----------------------------'
       # print gs
-      print x + 1
+      if ii == 2:
+        print x + 1
       # '''
 
       # if tf_global_step % report_frequency == 0:
-      if tf_global_step % 100 == 0:
+      if tf_global_step % report_frequency == 0:
         total_time = time.time() - initial_time
         steps_per_second = tf_global_step / total_time
 
@@ -88,6 +96,7 @@ if __name__ == "__main__":
         print '----------------------------'
         print x1
         print "number of entities:%d" % max(list(x2))
+        print "tagging_loss:%f, mention_loss:%f, antecedent_loss:%f" % (x6, x7, x8)
         print list(x2)
         print util.check_tags(x2)
         print list(x3)

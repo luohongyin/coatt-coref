@@ -8,7 +8,7 @@ import tensorflow as tf
 import pyhocon
 
 def check_tags(tags):
-  current_high = 0
+  current_high = -1
   for i, tag in enumerate(tags):
     if tag - current_high > 1:
       print "current_high: %d, tag: %d, location: %d" % (current_high, tag, i)
@@ -98,7 +98,7 @@ def ffnn_name(inputs, num_hidden_layers, hidden_size, output_size, name, dropout
     current_inputs = current_outputs
 
   with tf.variable_scope("attention", reuse=tf.AUTO_REUSE):
-    output_weights = tf.get_variable("output_weights_{}".format(name), [shape(current_inputs, 1), output_size], initializer=output_weights_initializer)
+    output_weights = tf.get_variable("output_weights_{}".format(name), [shape(current_inputs, 1), output_size], initializer=output_weights_initializer, validate_shape=False)
     output_bias = tf.get_variable("output_bias_{}".format(name), [output_size])
     outputs = tf.matmul(current_inputs, output_weights) + output_bias
 
@@ -268,14 +268,15 @@ class CustomLSTMCell(tf.contrib.rnn.RNNCell):
 
 
 class RecurrentMemNNCell(tf.contrib.rnn.RNNCell):
-  def __init__(self, num_units, batch_size, dropout, tag_labels, tag_seq, training=1):
+  def __init__(self, num_units, batch_size, dropout, tag_labels, tag_seq, training, k):
     self._tag_labels = tag_labels
     self._tag_seq = tag_seq
-    self.training = tf.Variable(training)
-    self._num_units = 100
+    self.training = training
+    self._num_units = 101 + k
     self._dropout = dropout
     self._max_entity = 100
     self.hidden_size = 200
+    self.k = tf.reshape(k, [])
 
     self._dropout_mask = tf.nn.dropout(tf.ones([batch_size, self.output_size]), dropout)
     self._initializer = self._block_orthonormal_initializer([100])
@@ -293,13 +294,15 @@ class RecurrentMemNNCell(tf.contrib.rnn.RNNCell):
     initial_cell_state = tf.reshape(initial_cell_state, [1, 20002])
 
     # initial_cell_state = tf.constant([[0.0, 2.0]], name="lstm_initial_cell_state")
-    initial_hidden_state = tf.get_variable("lstm_initial_hidden_state", [1, 100])
+    initial_hidden_state = tf.zeros([1, 101 + k])
+    # x = tf.matmul(initial_hidden_state, tf.zeros([10, 80]))
     self._initial_state = tf.contrib.rnn.LSTMStateTuple(initial_cell_state, initial_hidden_state)
 
     self.word_index_update = tf.constant([[1.0, 0.0]])
     self.entity_index_update = tf.constant([[0.0, 1.0]])
 
-    self.init_word_emb = tf.get_variable("init_word_emb", [1, self.hidden_size])
+    # self.init_word_emb = tf.get_variable("init_word_emb", [1, self.hidden_size])
+    # self.init_word_emb = tf.zeros([1, self.hidden_size])
 
     self.word_index = 0
     self.entity_index = 1
@@ -321,17 +324,23 @@ class RecurrentMemNNCell(tf.contrib.rnn.RNNCell):
   def evaluating(self):
     self._training = False
 
-  def preprocess_input(self, inputs, mention_scores):
+  def preprocess_input(self, inputs, mention_scores, antecedent_features):
     self.num_words = tf.shape(inputs)[0] + 1
-    input_emb = projection_name(inputs, self.hidden_size, 'input_emb')
-    self.sentence_emb = tf.nn.tanh(tf.concat([self.init_word_emb, tf.squeeze(input_emb)], 0)) # [num_words, emb]
-    self.sentence_head = tf.nn.tanh(tf.transpose(projection_name(self.sentence_emb, self.hidden_size, 'word_memnn')))
+    self.antecedent_features = antecedent_features
+    input_emb = tf.nn.tanh(projection_name(inputs, self.hidden_size, 'input_emb'))
+    # input_emb = inputs
+    self.sentence_emb = tf.transpose(input_emb, [1, 0, 2])[0]
+    # x = tf.matmul(self.sentence_emb, tf.zeros([10, 80]))
+    init_word_emb = tf.zeros([1, tf.shape(input_emb)[2]])
+    self.sentence_emb_init = tf.concat([init_word_emb, tf.squeeze(input_emb)], 0) # [num_words, emb]
+    # self.sentence_head = tf.nn.tanh(tf.transpose(projection_name(self.sentence_emb, self.hidden_size, 'word_memnn')))
 
     # self.entity_emb = tf.concat([self.basic_tag, self.new_entity_tag], 0)
-    num_mentions = tf.shape(mention_scores)
-    mention_scores = tf.tile(tf.expand_dims(mention_scores, 1), [1, 100])
-    scores_mask = tf.one_hot(tf.ones(num_mentions, dtype=tf.int32), 100)
-    self.mention_scores = mention_scores * (1 - scores_mask) - mention_scores * scores_mask
+    self.num_mentions = tf.shape(mention_scores)[0]
+    self.mention_scores = tf.expand_dims(mention_scores, 1)
+    # self.scores_tiled = tf.tile(self.mention_scores, [1, num_mentions])
+    self.scores_mask = tf.transpose(1 - tf.one_hot([0], 100))
+    # self.mention_scores = mention_scores * (1 - scores_mask) - mention_scores * scores_mask
     return input_emb
 
   def __call__(self, inputs, state, scope=None):
@@ -342,20 +351,38 @@ class RecurrentMemNNCell(tf.contrib.rnn.RNNCell):
       raw_cell = tf.reshape(c, [1, 20002])
       indexes, memories = tf.split(raw_cell, [2, 20000], 1)
       cell = tf.squeeze(indexes)
+      inputs, current_score = tf.split(inputs, [self.hidden_size, 1], 1)
+      context_mention_score = tf.tile(current_score, [self.num_mentions, 1])
+      entity_mention_score = tf.tile(current_score, [100, 1]) * self.scores_mask
 
       entity_emb = tf.reshape(memories, [100, self.hidden_size])
 
       word_index = tf.cast(tf.gather(cell, [0]), tf.int64)
       entity_index = tf.cast(tf.gather(cell, [1]), tf.int64)
+      # current_score = tf.transpose(tf.gather(self.scores_tiled, word_index))
 
-      mention_score = tf.gather(self.mention_scores, word_index)
+      # curr_mention_score = tf.tile(current_score, [1, self.num_mentions])
+      pair_feature = tf.gather(self.antecedent_features, word_index)[0]
+
+      inputs_tiled = tf.tile(inputs, [self.num_words - 1, 1])
+
+      pair_emb = tf.concat([pair_feature, inputs_tiled, self.sentence_emb], 1)
+      # x = tf.matmul(pair_emb, tf.zeros([10, 80]))
+
+      mention_att = projection_name(pair_emb, 1, 'context_att') + self.mention_scores + context_mention_score
+      # x = tf.matmul(tf.cast(mention_att, tf.float32), tf.zeros([10, 80]))
+
+      # mention_att = tf.transpose(tf.concat([tf.zeros([1, 1]), mention_att], 0))
+      # x = tf.matmul(tf.cast(mention_att, tf.float32), tf.zeros([10, 80]))
 
       word_mask = tf.reshape(tf.sequence_mask(word_index + 1, self.num_words, dtype=tf.float32), [1, -1])
       entity_mask = tf.reshape(tf.sequence_mask(entity_index + 1, self._max_entity, dtype=tf.float32), [1, -1])
       entity_mask_write = tf.reshape(tf.sequence_mask(entity_index, self._max_entity, dtype=tf.float32), [1, -1])
 
-      hist_attn = tf.nn.softmax(tf.matmul(inputs, self.sentence_head) + tf.log(word_mask), dim=1)
-      hist_emb = tf.transpose(tf.reduce_sum(tf.transpose(hist_attn) * self.sentence_emb))
+      mention_att = tf.transpose(tf.concat([tf.zeros([1, 1]), mention_att], 0)) + tf.log(word_mask)
+      # hist_attn = tf.nn.softmax(tf.matmul(inputs, self.sentence_head) + tf.log(word_mask), dim=1)
+      hist_attn = tf.nn.softmax(mention_att, dim=1)
+      hist_emb = tf.transpose(tf.reduce_sum(tf.transpose(hist_attn) * self.sentence_emb_init))
 
       hist_emb = tf.reshape(hist_emb, [1, -1])
 
@@ -366,12 +393,18 @@ class RecurrentMemNNCell(tf.contrib.rnn.RNNCell):
       tag_gate = tf.concat([tag_input, entity_emb], 1, name='concat_gate')
 
       # logits = tf.nn.softmax(tf.matmul(tag_query, tf.transpose(entity_emb)) + tf.log(entity_mask) + mention_score)
-      logits = tf.matmul(tag_query, tf.transpose(entity_emb)) + tf.log(entity_mask) + mention_score
-      self.prediction = tf.argmax(logits)
+      # logits = tf.matmul(tag_query, tf.transpose(entity_emb)) + tf.log(entity_mask) # + mention_score
+      logits = tf.transpose(projection_name(tag_gate, 1, 'logits') + entity_mention_score) + tf.log(entity_mask)
+
+      prediction = tf.argmax(logits, axis=1)
+
+      # x = tf.matmul(tf.cast(prediction, tf.float32), tf.zeros([10, 80]))
 
       new_entity_query = tf.cond(tf.equal(self.training, 1),
               lambda: tf.cast(tf.gather(self._tag_seq, word_index), tf.int64),
-              lambda: self.prediction)
+              lambda: prediction)
+      
+      # x = tf.matmul(tf.cast(prediction, tf.float32), tf.zeros([10, 80]))
       
       new_entity_cond = tf.reshape(tf.equal(new_entity_query, entity_index), [])
 
@@ -381,6 +414,8 @@ class RecurrentMemNNCell(tf.contrib.rnn.RNNCell):
               lambda: tf.one_hot([self.entity_index], self._max_entity),
               lambda: tf.nn.sigmoid(projection_name(tag_gate, 1, 'write_head') + tf.log(tf.transpose(entity_mask_write))))
       
+      # x = tf.matmul(tf.cast(prediction, tf.float32), tf.zeros([10, 80]))
+      
       write_head = tf.reshape(write_head, [100, 1])
       new_entity_emb = tf.reshape(write_head * tag_input + (1 - write_head) * entity_emb, [1, 20000])
 
@@ -388,10 +423,16 @@ class RecurrentMemNNCell(tf.contrib.rnn.RNNCell):
       new_indexes = indexes + self.word_index_update + e_update
 
       new_c = tf.concat([new_indexes, new_entity_emb], 1)
+      new_h = tf.concat([logits, mention_att], 1)
 
-      new_state = tf.contrib.rnn.LSTMStateTuple(new_c, logits)
+      # zero_padding = tf.zeros([1, 1600] - tf.shape(new_h), dtype=new_h.dtype)
+      # new_h = tf.concat([new_h, zero_padding], 1)
 
-      return logits, new_state
+      new_state = tf.contrib.rnn.LSTMStateTuple(new_c, new_h)
+
+      # x = tf.matmul(tf.cast(new_h, tf.float32), tf.zeros([10, 80]))
+
+      return new_h, new_state
 
   def _orthonormal_initializer(self, scale=1.0):
     def _initializer(shape, dtype=tf.float32, partition_info=None):

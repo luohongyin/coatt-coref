@@ -9,7 +9,7 @@ import random
 
 import numpy as np
 import tensorflow as tf
-import coref_model_memnn_cnn3 as cm
+import coref_model_gnc as cm
 import util
 
 if __name__ == "__main__":
@@ -27,7 +27,7 @@ if __name__ == "__main__":
   config["log_dir"] = util.mkdirs(os.path.join(config["log_root"], name))
 
   util.print_config(config)
-  model = cm.CorefModel(config)
+  model = cm.CorefModel(config, 0)
 
   saver = tf.train.Saver()
   log_dir = config["log_dir"]
