@@ -6,7 +6,8 @@ import threading
 import numpy as np
 import tensorflow as tf
 
-import util
+# import util
+import util_mr2es as util
 import coref_ops
 import conll
 import metrics
@@ -253,7 +254,7 @@ class CorefModel(object):
     candidate_mention_emb = self.get_mention_emb(flattened_text_emb, text_outputs, candidate_starts, candidate_ends) # [num_candidates, emb]
     candidate_mention_logits =  self.get_mention_scores(candidate_mention_emb) # [num_mentions, 2]
 
-    mention_loss = tf.losses.softmax_cross_entropy(span_labels_bin, candidate_mention_logits)
+    # mention_loss = tf.losses.softmax_cross_entropy(span_labels_bin, candidate_mention_logits)
     # mention_loss = tf.nn.softmax_cross_entropy_with_logits(logits=candidate_mention_logits,
     #                                                       labels=span_labels_bin)
     
@@ -347,7 +348,7 @@ class CorefModel(object):
     # loss = -tf.reduce_sum((1 - span_labels) * tf.log(1 - y))
 
     self.tagging_loss = tagging_loss
-    self.mention_loss = mention_loss
+    # self.mention_loss = mention_loss
     self.antecedent_loss = antecedent_loss
 
     loss = tagging_loss + antecedent_loss # + mention_loss
@@ -727,7 +728,7 @@ class CorefModel(object):
     for example_num, (tensorized_example, example) in enumerate(self.eval_data):
       _, _, _, _, _, _, gold_starts, gold_ends,  cluster_ids, span_labels, span_seq = tensorized_example
       feed_dict = {i:t for i,t in zip(self.input_tensors, tensorized_example)}
-      candidate_starts, candidate_ends, mention_scores, mention_starts, mention_ends, p = session.run(self.predictions, feed_dict=feed_dict)
+      [candidate_starts, candidate_ends, mention_scores, mention_starts, mention_ends, p], state = session.run([self.predictions, self.fw_state], feed_dict=feed_dict)
 
       self.evaluate_mentions(candidate_starts, candidate_ends, mention_starts, mention_ends, mention_scores, gold_starts, gold_ends, example, mention_evaluators)
       # predicted_antecedents = self.get_predicted_antecedents(antecedents, antecedent_scores)
@@ -739,6 +740,7 @@ class CorefModel(object):
         print "Evaluated {}/{} examples.".format(example_num + 1, len(self.eval_data))
         print util.check_tags(predicted_antecedents)
         print max(predicted_antecedents)
+        # print state
         # print tag_outputs
         # print tag_seq
 

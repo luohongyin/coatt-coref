@@ -284,8 +284,8 @@ class RecurrentMemNNCell(tf.contrib.rnn.RNNCell):
     initial_indexes = tf.constant([[0.0, 1.0]], name="initial_indexes")
     # initial_memory = tf.zeros([1, 20000])
 
-    basic_tag = tf.zeros([1, self.hidden_size])
-    # basic_tag = tf.get_variable("basic_tag", [1, self.hidden_size])
+    # basic_tag = tf.zeros([1, self.hidden_size])
+    basic_tag = tf.get_variable("basic_tag", [1, self.hidden_size])
     new_entity_tag = tf.zeros([99, self.hidden_size], name="new_entity_emb")
     entity_emb = tf.concat([basic_tag, new_entity_tag], 0)
 
@@ -372,7 +372,8 @@ class RecurrentMemNNCell(tf.contrib.rnn.RNNCell):
       pair_emb = tf.concat([pair_feature, inputs_tiled, self.sentence_emb], 1)
       # x = tf.matmul(pair_emb, tf.zeros([10, 80]))
 
-      mention_att = projection_name(pair_emb, 1, 'context_att') + self.mention_scores# + context_mention_score
+      # mention_att = projection_name(pair_emb, 1, 'context_att') + self.mention_scores# + context_mention_score
+      mention_att = ffnn_name(pair_emb, 2, 150, 1, 'context_att', self._dropout) + self.mention_scores# + context_mention_score
       # x = tf.matmul(tf.cast(mention_att, tf.float32), tf.zeros([10, 80]))
 
       # mention_att = tf.transpose(tf.concat([tf.zeros([1, 1]), mention_att], 0))
@@ -389,17 +390,22 @@ class RecurrentMemNNCell(tf.contrib.rnn.RNNCell):
 
       hist_emb = tf.reshape(hist_emb, [1, -1])
 
-      tag_query = tf.concat([hist_emb, inputs], 1, name='concat_hist')
-      tag_query = tf.nn.tanh(projection_name(tag_query, self.hidden_size, 'tag_query'))
-      tag_input = tf.tile(tag_query, [100, 1])
+      # tag_query = tf.concat([hist_emb, inputs], 1, name='concat_hist')
+      # tag_query = tf.nn.tanh(projection_name(tag_query, self.hidden_size, 'tag_query'))
+      tag_input = tf.tile(inputs, [100, 1])
+      hist_input = tf.tile(hist_emb, [100, 1])
 
       tag_gate = tf.concat([tag_input, entity_emb], 1, name='concat_gate')
+      hist_gate = tf.concat([hist_input, entity_emb], 1, name='hist_gate')
+
+      sum_logits = ffnn_name(tag_gate, 2, 150, 1, 'entity_scoring', self._dropout) +\
+                    ffnn_name(hist_gate, 2, 150, 1, 'hist_scoring', self._dropout)
 
       # logits = tf.nn.softmax(tf.matmul(tag_query, tf.transpose(entity_emb)) + tf.log(entity_mask) + mention_score)
       # logits = tf.matmul(tag_query, tf.transpose(entity_emb)) + tf.log(entity_mask) + tf.transpose(entity_mention_score)
       # logits = tf.transpose(tf.matmul(entity_emb, tf.transpose(tag_query)) + entity_mention_score) + tf.log(entity_mask)
       # logits = tf.transpose((projection_name(tag_gate, 1, 'entity_scoring') + entity_mention_score) * self.scores_mask) + tf.log(entity_mask)
-      logits = tf.transpose((projection_name(tag_gate, 1, 'entity_scoring') + entity_mention_score) * self.scores_mask) + tf.log(entity_mask)
+      logits = tf.transpose(sum_logits + entity_mention_score) + tf.log(entity_mask)
       # with tf.variable_scope("entity_scoring"):
       #   logits = tf.transpose(ffnn(tag_gate, 2, 150, 1, self._dropout) + entity_mention_score) + tf.log(entity_mask)
 

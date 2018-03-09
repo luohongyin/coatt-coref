@@ -51,7 +51,7 @@ if __name__ == "__main__":
     acc_tagging_loss = 0.0
     initial_time = time.time()
     while not sv.should_stop():
-      loss, tf_global_step, _, x1, x2, x3, x4, x5, x6, x7, x8, x9 = session.run([model.loss,
+      loss, tf_global_step, _, x1, x2, x3, x4, x5, x6, x8, x9 = session.run([model.loss,
                                               model.global_step,
                                               model.train_op,
                                               model.logits_shape,
@@ -60,7 +60,7 @@ if __name__ == "__main__":
                                               model.fw_state,
                                               model.span_labels,
                                               model.tagging_loss,
-                                              model.mention_loss,
+                                              # model.mention_loss,
                                               model.antecedent_loss,
                                               model.antecedent_scores_shape])
       # acc_mention_loss += mention_loss
@@ -70,7 +70,7 @@ if __name__ == "__main__":
       print '----------------------------'
       print x1
       print "number of entities:%d" % max(list(x2))
-      print "tagging_loss:%f, mention_loss:%f, antecedent_loss:%f" % (x6, x7, x8)
+      print "tagging_loss:%f, mention_loss: NA, antecedent_loss:%f" % (x6, x8)
       print list(x2)
       print util.check_tags(x2)
       print list(x3)
@@ -96,7 +96,7 @@ if __name__ == "__main__":
         print '----------------------------'
         print x1
         print "number of entities:%d" % max(list(x2))
-        print "tagging_loss:%f, mention_loss:%f, antecedent_loss:%f" % (x6, x7, x8)
+        print "tagging_loss:%f, mention_loss:NA, antecedent_loss:%f" % (x6, x8)
         print list(x2)
         print util.check_tags(x2)
         print list(x3)
