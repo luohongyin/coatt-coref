@@ -284,8 +284,8 @@ class RecurrentMemNNCell(tf.contrib.rnn.RNNCell):
     initial_indexes = tf.constant([[0.0, 1.0]], name="initial_indexes")
     # initial_memory = tf.zeros([1, 20000])
 
-    basic_tag = tf.zeros([1, self.hidden_size])
-    # basic_tag = tf.get_variable("basic_tag", [1, self.hidden_size])
+    # basic_tag = tf.zeros([1, self.hidden_size])
+    basic_tag = tf.get_variable("basic_tag", [1, self.hidden_size])
     new_entity_tag = tf.zeros([99, self.hidden_size], name="new_entity_emb")
     entity_emb = tf.concat([basic_tag, new_entity_tag], 0)
 
@@ -372,7 +372,7 @@ class RecurrentMemNNCell(tf.contrib.rnn.RNNCell):
       pair_emb = tf.concat([pair_feature, inputs_tiled, self.sentence_emb], 1)
       # x = tf.matmul(pair_emb, tf.zeros([10, 80]))
 
-      mention_att = projection_name(pair_emb, 1, 'context_att') + self.mention_scores# + context_mention_score
+      mention_att = projection_name(pair_emb, 1, 'context_att')# + self.mention_scores# + context_mention_score
       # x = tf.matmul(tf.cast(mention_att, tf.float32), tf.zeros([10, 80]))
 
       # mention_att = tf.transpose(tf.concat([tf.zeros([1, 1]), mention_att], 0))

@@ -60,7 +60,7 @@ if __name__ == "__main__":
                                               model.fw_state,
                                               model.span_labels,
                                               model.tagging_loss,
-                                              # model.mention_loss,
+                                              # model.mention_loss, ----- x7
                                               model.antecedent_loss,
                                               model.antecedent_scores_shape])
       # acc_mention_loss += mention_loss
@@ -70,12 +70,16 @@ if __name__ == "__main__":
       print '----------------------------'
       print x1
       print "number of entities:%d" % max(list(x2))
-      print "tagging_loss:%f, mention_loss: NA, antecedent_loss:%f" % (x6, x8)
+      print "tagging_loss:%f, mention_loss:NA, antecedent_loss:%f" % (x6, x8)
       print list(x2)
       print util.check_tags(x2)
-      print list(x3)
+      print list(x3[0])
       print x4
-      print x9
+      # print x10
+      print "log_norm:%f, gold_scores:%f, reverse_gold_scores:%f" % (x10, x11, x12)
+      # print len(x10)
+      # print [x10[7].shape]
+      # print x10[7]
       print '----------------------------'
       # print gs
       if ii == 2:
@@ -99,7 +103,7 @@ if __name__ == "__main__":
         print "tagging_loss:%f, mention_loss:NA, antecedent_loss:%f" % (x6, x8)
         print list(x2)
         print util.check_tags(x2)
-        print list(x3)
+        print list(x3[0])
         print x4
         print '----------------------------'
         # '''

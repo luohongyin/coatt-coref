@@ -52,13 +52,17 @@ class CorefModel(object):
     learning_rate = tf.train.exponential_decay(self.config["learning_rate"], self.global_step,
                                                self.config["decay_frequency"], self.config["decay_rate"], staircase=True)
     trainable_params = tf.trainable_variables()
+    gnc_params = tf.trainable_variables("gnc/fw_gnc")
     gradients = tf.gradients(self.loss, trainable_params)
+    gnc_gradients = tf.gradients(self.loss, gnc_params)
     gradients, _ = tf.clip_by_global_norm(gradients, self.config["max_gradient_norm"])
     optimizers = {
       "adam" : tf.train.AdamOptimizer,
       "sgd" : tf.train.GradientDescentOptimizer
     }
     optimizer = optimizers[self.config["optimizer"]](learning_rate)
+    self.trainable_variables = gnc_params
+    self.gradients = gnc_gradients
     self.train_op = optimizer.apply_gradients(zip(gradients, trainable_params), global_step=self.global_step)
 
   def start_enqueue_thread(self, session):
@@ -205,10 +209,7 @@ class CorefModel(object):
                               span_seq):
 
     self.gold_starts = gold_starts
-    # self.gold_ends = gold_ends
     self.cluster_ids = cluster_ids
-    # self.span_labels = span_labels
-    # self.span_seq = span_seq
 
     span_seq_bin = tf.where(tf.greater(span_seq, 0), tf.ones_like(span_seq), tf.zeros_like(span_seq))
     span_labels_bin = tf.one_hot(span_seq_bin, 2) # [num_mention, 2]
@@ -266,6 +267,7 @@ class CorefModel(object):
     # candidate_mention_scores = tf.squeeze(candidate_mention_scores, 1) # [num_mentions]
 
     k = tf.to_int32(tf.floor(tf.to_float(tf.shape(text_outputs)[0]) * self.config["mention_ratio"]))
+    k = tf.cond(is_training, lambda: tf.minimum(k, 600), lambda: k)
     predicted_mention_indices = coref_ops.extract_mentions(candidate_mention_scores, candidate_starts, candidate_ends, k) # ([k], [k])
     predicted_mention_indices.set_shape([None])
 
@@ -310,7 +312,7 @@ class CorefModel(object):
     span_seq_sorted = coref_ops.tagging(tf.gather(span_seq, predicted_mention_indices))
     predicted_mention_indices.set_shape([None])
 
-    span_labels = tf.one_hot(span_seq_sorted, 100)
+    span_labels = tf.expand_dims(tf.one_hot(span_seq_sorted, 100), 0)
 
     self.span_labels = tf.reduce_sum(span_labels)
     self.span_seq = span_seq_sorted
@@ -337,8 +339,10 @@ class CorefModel(object):
     # span_seq_expanded = tf.expand_dims(span_seq_sorted, 0)
     # loss = tf.losses.log_loss(span_labels, tf.squeeze(tf.nn.softmax(logits, dim=2))) + .1 * mention_loss
     # self.tag_seq = tag_seq
-    tagging_loss = tf.reduce_sum(self.tag_loss(tf.squeeze(logits), span_labels))
-    # loss = tf.reduce_sum(tf.squeeze(tf.nn.softmax(logits, dim=2)) - span_labels) * 10
+
+    # tagging_loss = tf.reduce_sum(self.sigmoid_margin(logits, tf.to_float(span_labels), tf.to_float(k)))
+
+    tagging_loss = tf.reduce_sum(self.exp_loss_margin(logits, tf.to_float(span_labels), 2))
 
     antecedent_loss = tf.reduce_sum(self.softmax_loss(antecedent_scores[0], antecedent_labels))
 
@@ -365,11 +369,37 @@ class CorefModel(object):
           ], loss
     # return predictions, tf.reduce_sum(tf.multiply(tf.to_float(tag_loss_label), loss))
   
+  def sigmoid_margin(self, logits, span_labels, k):
+    y = tf.nn.sigmoid(logits)
+    return (1 - y) * span_labels + y * (1 - span_labels)
+  
+  def softmax_margin(self, logits, span_labels, k):
+    y = tf.nn.softmax(logits, dim=2)
+    return (1 - y) * span_labels + y * (1 - span_labels)
+  
   def tag_loss(self, logits, span_labels):
-    gold_scores = logits + tf.log(tf.to_float(span_labels))
-    marginalized_gold_scores = tf.reduce_logsumexp(gold_scores, [1])
-    log_norm = tf.reduce_logsumexp(logits, [1])
+    gold_scores = logits + tf.log(span_labels)
+    marginalized_gold_scores = tf.reduce_logsumexp(gold_scores, [2])
+    # self.marginalized_gold_scores = tf.reduce_sum(marginalized_gold_scores)
+    log_norm = tf.reduce_logsumexp(logits, [2])
+    # self.log_norm = log_norm
     return log_norm - marginalized_gold_scores
+
+  def exp_loss_margin(self, logits, span_labels, d):
+    gold_scores = logits + tf.log(tf.to_float(span_labels))
+    reverse_gold_scores = tf.where(tf.is_inf(logits), logits, -1 * logits) + tf.log(tf.to_float(span_labels))
+
+    marginalized_gold_scores = tf.reduce_logsumexp(gold_scores, [d])
+    marginalized_reverse_gold_scores = tf.reduce_logsumexp(reverse_gold_scores, [d])
+    mask = tf.zeros_like(marginalized_reverse_gold_scores)
+
+    log_norm = tf.reduce_logsumexp(logits, [d])
+
+    # self.gold_scores = tf.reduce_sum(marginalized_gold_scores)
+    # self.reverse_gold_scores = tf.reduce_sum(marginalized_reverse_gold_scores)
+    # self.log_norm = tf.reduce_sum(log_norm)
+
+    return log_norm - marginalized_gold_scores + tf.maximum(marginalized_reverse_gold_scores, mask)
   
   def gnc_tagging(self, text_emb, span_labels, span_seq, mention_scores, antecedent_features, k):
     num_sentences = tf.shape(text_emb)[0]
