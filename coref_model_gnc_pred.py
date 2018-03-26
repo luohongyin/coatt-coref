@@ -6,11 +6,7 @@ import threading
 import numpy as np
 import tensorflow as tf
 
-# import util
-# import util_mr2es as util
-# import util_gru as util
-import util_entity as util
-# import util_hatt as util
+import util_gru_adanew as util
 import coref_ops
 import conll
 import metrics
@@ -404,14 +400,7 @@ class CorefModel(object):
 
     log_norm = tf.reduce_logsumexp(logits, [d])
 
-    # return log_norm - marginalized_gold_scores + marginalized_reverse_gold_scores
     return log_norm - marginalized_gold_scores + tf.maximum(marginalized_reverse_gold_scores, mask)
-  
-  def margin_loss(self, logits, span_labels, d):
-    gold_scores = tf.reduce_max(logits + tf.log(tf.to_float(span_labels)), [d]) + 1
-    pred_scores = tf.reduce_max(logits, [d])
-
-    return pred_scores - gold_scores
 
   def exp_loss_combine(self, logits, span_labels, d):
     gold_scores = logits + tf.log(tf.to_float(span_labels))
@@ -450,8 +439,9 @@ class CorefModel(object):
     with tf.variable_scope("gnc_cell"):
       self.cell_fw = util.RecurrentMemNNCell(self.config["lstm_size"], num_sentences, self.dropout, span_labels, span_seq, self.training, k)
       preprocessed_inputs_fw = self.cell_fw.preprocess_input(inputs, mention_scores, antecedent_features)
+      pred_new = self.encode_mention_seq(preprocessed_inputs_fw)
       input_scores = tf.reshape(mention_scores, [-1, 1, 1])
-      preprocessed_inputs_fw = tf.concat([preprocessed_inputs_fw, input_scores], 2)
+      preprocessed_inputs_fw = tf.concat([preprocessed_inputs_fw, input_scores, pred_new], 2)
       
     state_fw = tf.contrib.rnn.LSTMStateTuple(tf.tile(self.cell_fw.initial_state.c, [num_sentences, 1]), tf.tile(self.cell_fw.initial_state.h, [num_sentences, 1]))
     with tf.variable_scope("gnc"):
@@ -622,12 +612,12 @@ class CorefModel(object):
       raise ValueError("Unsupported rank: {}".format(emb_rank))
     return tf.boolean_mask(flattened_emb, text_len_mask)
   
-  def encode_sentences_unilstm(self, text_conv):
-    num_sentences = tf.shape(text_conv)[0]
-    max_sentence_length = tf.shape(text_conv)[1]
+  def encode_sentences_unilstm(self, inputs):
+    num_sentences = tf.shape(inputs)[1]
+    max_sentence_length = tf.shape(inputs)[0]
 
     # Transpose before and after for efficiency.
-    inputs = tf.transpose(text_conv, [1, 0, 2]) # [max_sentence_length, num_sentences, emb]
+    # inputs = tf.transpose(text_conv, [1, 0, 2]) # [max_sentence_length, num_sentences, emb]
 
     with tf.variable_scope("fw_cell_uni"):
       cell_fw = util.CustomLSTMCell(self.config["lstm_size"], num_sentences, self.dropout)
@@ -640,8 +630,51 @@ class CorefModel(object):
                                                   initial_state=state_fw,
                                                   time_major=True)
 
-    text_outputs = tf.transpose(fw_outputs, [1, 0, 2]) # [num_sentences, max_sentence_length, emb]
-    return text_outputs
+    # text_outputs = tf.transpose(fw_outputs, [1, 0, 2]) # [num_sentences, max_sentence_length, emb]
+    return fw_outputs
+  
+  def encode_mention_seq(self, inputs):
+    num_sentences = tf.shape(inputs)[1]
+    max_sentence_length = tf.reshape(tf.shape(inputs)[0], [1])
+
+    # Transpose before and after for efficiency.
+    # inputs = tf.transpose(text_emb, [1, 0, 2]) # [max_sentence_length, num_sentences, emb]
+
+    with tf.variable_scope("fw_cell_mention"):
+      cell_fw = util.CustomLSTMCell(self.config["lstm_size"], num_sentences, self.dropout)
+      preprocessed_inputs_fw = cell_fw.preprocess_input(inputs)
+    with tf.variable_scope("bw_cell_mention"):
+      cell_bw = util.CustomLSTMCell(self.config["lstm_size"], num_sentences, self.dropout)
+      preprocessed_inputs_bw = cell_bw.preprocess_input(inputs)
+      preprocessed_inputs_bw = tf.reverse_sequence(preprocessed_inputs_bw,
+                                                   seq_lengths=max_sentence_length,
+                                                   seq_dim=0,
+                                                   batch_dim=1)
+    state_fw = tf.contrib.rnn.LSTMStateTuple(tf.tile(cell_fw.initial_state.c, [num_sentences, 1]), tf.tile(cell_fw.initial_state.h, [num_sentences, 1]))
+    state_bw = tf.contrib.rnn.LSTMStateTuple(tf.tile(cell_bw.initial_state.c, [num_sentences, 1]), tf.tile(cell_bw.initial_state.h, [num_sentences, 1]))
+    with tf.variable_scope("lstm"):
+      with tf.variable_scope("fw_lstm"):
+        fw_outputs, fw_states = tf.nn.dynamic_rnn(cell=cell_fw,
+                                                  inputs=preprocessed_inputs_fw,
+                                                  sequence_length=max_sentence_length,
+                                                  initial_state=state_fw,
+                                                  time_major=True)
+      with tf.variable_scope("bw_lstm"):
+        bw_outputs, bw_states = tf.nn.dynamic_rnn(cell=cell_bw,
+                                                  inputs=preprocessed_inputs_bw,
+                                                  sequence_length=max_sentence_length,
+                                                  initial_state=state_bw,
+                                                  time_major=True)
+
+    bw_outputs = tf.reverse_sequence(bw_outputs,
+                                     seq_lengths=max_sentence_length,
+                                     seq_dim=0,
+                                     batch_dim=1)
+
+    # text_outputs = tf.concat([fw_outputs, bw_outputs], 2)
+    # text_outputs = tf.transpose(text_outputs, [1, 0, 2]) # [num_sentences, max_sentence_length, emb]
+    # return self.flatten_emb_by_sentence(text_outputs, text_len_mask)
+    return fw_outputs + bw_outputs
 
   def encode_sentences(self, text_emb, text_len, text_len_mask):
     num_sentences = tf.shape(text_emb)[0]

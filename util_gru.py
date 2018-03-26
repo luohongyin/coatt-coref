@@ -385,23 +385,17 @@ class RecurrentMemNNCell(tf.contrib.rnn.RNNCell):
       tag_gate = tf.concat([tag_input, entity_emb], 1, name='concat_gate')
       hist_gate = tf.concat([hist_input, entity_emb], 1, name='hist_gate')
 
-      # sum_logits = tf.matmul(hist_gate, tf.zeros([4, 10]))
-
-      # sum_logits = projection_name(tag_gate, 1, "entity_scoring") + projection_name(hist_gate, 1, "hist_scoring")
-
-      # sum_logits = tf.matmul(entity_emb, tf.transpose(inputs), name='matmul_input') + tf.matmul(entity_emb, tf.transpose(hist_emb), name='matmul_hist')
-
       sum_logits = ffnn_name(tag_gate, 1, 150, 1, 'entity_scoring', self._dropout) +\
                     ffnn_name(hist_gate, 1, 150, 1, 'hist_scoring', self._dropout)
 
       # logits = tf.nn.softmax(tf.matmul(tag_query, tf.transpose(entity_emb)) + tf.log(entity_mask) + mention_score)
       # logits = tf.matmul(tag_query, tf.transpose(entity_emb)) + tf.log(entity_mask) + tf.transpose(entity_mention_score)
-      # logits = tf.transpose(sum_logits + entity_mention_score) + tf.log(entity_mask)
-      # logits = tf.transpose((projection_name(tag_gate, 1, 'entity_scoring') + entity_mention_score) * self.scores_mask) + tf.log(entity_mask)
-      
-      # logits = tf.transpose((sum_logits + entity_mention_score) * self.scores_mask) + tf.log(entity_mask)
 
-      logits = tf.transpose(sum_logits * self.scores_mask) + tf.log(entity_mask)
+      # logits = tf.transpose(sum_logits + entity_mention_score) + tf.log(entity_mask)
+      
+      logits = tf.transpose((sum_logits + entity_mention_score) * self.scores_mask) + tf.log(entity_mask)
+
+      # logits = tf.transpose(sum_logits * self.scores_mask) + tf.log(entity_mask)
 
       prediction = tf.argmax(logits, axis=1)
 
@@ -410,6 +404,7 @@ class RecurrentMemNNCell(tf.contrib.rnn.RNNCell):
               lambda: prediction)
       
       write_head_mask = tf.transpose(tf.one_hot(new_entity_query, 100))
+      # write_head_mask = tf.tile(write_head_mask, [1, self.hidden_size])
       
       # x = tf.matmul(tf.cast(prediction, tf.float32), tf.zeros([10, 80]))
       
@@ -417,32 +412,24 @@ class RecurrentMemNNCell(tf.contrib.rnn.RNNCell):
 
       e_update = tf.cond(new_entity_cond, lambda: self.entity_index_update, lambda: tf.zeros([1, 2]))
 
-      sigmoid_write_head = tf.nn.sigmoid(projection_name(tag_gate, 1, 'write_head') + tf.log(tf.transpose(entity_mask_write)))
-
-      write_head = tf.cond(new_entity_cond,
-              lambda: tf.one_hot([entity_index], self._max_entity),
-              lambda: sigmoid_write_head)
+      with tf.variable_scope("reset_gate"):
+        rt = self.gate(tag_input, entity_emb, self.hidden_size, tf.nn.sigmoid)
       
-      # x = tf.matmul(tf.cast(prediction, tf.float32), tf.zeros([10, 80]))
+      with tf.variable_scope("update_gate"):
+        zt = self.gate(tag_input, entity_emb, self.hidden_size, tf.nn.sigmoid)
       
-      write_head = tf.reshape(write_head, [100, 1]) * write_head_mask
-      new_entity_emb = write_head * tag_input + (1 - write_head) * entity_emb
+      with tf.variable_scope("activation"):
+        activation = self.gate(tag_input, rt * entity_emb, self.hidden_size, tf.tanh)
+      
+      h_new = zt * activation + (1 - zt) * entity_emb
 
-      read_emb = tf.gather(new_entity_emb, new_entity_query)
-      new_entity_emb = tf.reshape(new_entity_emb, [1, 20000])
-
-      read_emb_tiled = tf.tile(read_emb, [self.num_words - 1, 1])
-      pair_emb_remap = tf.reshape(tf.concat([read_emb_tiled, self.sentence_emb], 1), [-1, 400])
-
-      mention_remap = ffnn_name(pair_emb_remap, 1, 150, 1, 'context_remap', self._dropout)
-
-      mention_remap = tf.concat([tf.zeros([1, 1]), mention_remap], 0) + tf.log(word_mask)
+      new_entity_emb = tf.reshape(write_head_mask * h_new + (1 - write_head_mask) * entity_emb, [1, 20000])
 
       # print 14
       new_indexes = indexes + self.word_index_update + e_update
 
       new_c = tf.concat([new_indexes, new_entity_emb], 1)
-      new_h = tf.concat([logits, tf.transpose(mention_att + mention_remap)], 1)
+      new_h = tf.concat([logits, tf.transpose(mention_att)], 1)
 
       # zero_padding = tf.zeros([1, 1600] - tf.shape(new_h), dtype=new_h.dtype)
       # new_h = tf.concat([new_h, zero_padding], 1)
@@ -452,6 +439,11 @@ class RecurrentMemNNCell(tf.contrib.rnn.RNNCell):
       # x = tf.matmul(tf.cast(new_h, tf.float32), tf.zeros([10, 80]))
 
       return new_h, new_state
+  
+  def gate(self, x, h, output_size, f):
+        wx = projection_name(x, output_size, 'wx')
+        uh = projection_name(h, output_size, 'uh')
+        return f(wx + uh)
 
   def _orthonormal_initializer(self, scale=1.0):
     def _initializer(shape, dtype=tf.float32, partition_info=None):
