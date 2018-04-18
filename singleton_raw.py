@@ -9,8 +9,8 @@ import random
 
 import numpy as np
 import tensorflow as tf
-import coref_model as cm
-import util
+import coref_model_rgcn as cm
+import util_rgcn as util
 
 if __name__ == "__main__":
   if len(sys.argv) > 1:
@@ -49,8 +49,14 @@ if __name__ == "__main__":
     accumulated_loss = 0.0
     initial_time = time.time()
     while not sv.should_stop():
-      tf_loss, tf_global_step, _ = session.run([model.loss, model.global_step, model.train_op])
+      tf_loss, tf_global_step, _, scores = session.run([model.loss, model.global_step, model.train_op,
+                                                          model.scores,
+                                                          ])
       accumulated_loss += tf_loss
+      # print tf_loss
+      # print scores
+      # print shape
+      # print x + 1
 
       if tf_global_step % report_frequency == 0:
         total_time = time.time() - initial_time
@@ -58,6 +64,7 @@ if __name__ == "__main__":
 
         average_loss = accumulated_loss / report_frequency
         print "[{}] loss={:.2f}, steps/s={:.2f}".format(tf_global_step, average_loss, steps_per_second)
+        # print scores
         writer.add_summary(util.make_summary({"loss": average_loss}), tf_global_step)
         accumulated_loss = 0.0
 

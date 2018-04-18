@@ -9,7 +9,7 @@ import tensorflow as tf
 # import util
 # import util_mr2es as util
 # import util_gru as util
-import util_entity as util
+import util_mr2es as util
 # import util_hatt as util
 import coref_ops
 import conll
@@ -265,14 +265,15 @@ class CorefModel(object):
     # mention_loss = tf.reduce_sum(mention_loss)
     # mention_loss = tf.reduce_sum(mention_loss * tf.cast(span_seq_bin, tf.float32))
 
-    candidate_mention_scores = tf.squeeze(tf.gather(tf.transpose(candidate_mention_logits), 1))
+    # candidate_mention_scores = tf.squeeze(tf.gather(tf.transpose(candidate_mention_logits), 1)) -\
+    #                             tf.squeeze(tf.gather(tf.transpose(candidate_mention_logits), 0))
     
-    # candidate_mention_scores = tf.squeeze(candidate_mention_scores, 1) # [num_mentions]
+    candidate_mention_scores = tf.squeeze(tf.gather(tf.transpose(candidate_mention_logits), 1)) # [num_mentions]
 
     k = tf.to_int32(tf.floor(tf.to_float(tf.shape(text_outputs)[0]) * self.config["mention_ratio"]))
     # k = tf.cond(is_training, lambda: k, lambda: tf.shape(text_outputs)[0])
-    k = tf.cond(is_training, lambda: tf.minimum(k, 600), lambda: k)
-    # k = tf.minimum(k, 900)
+    # k = tf.cond(is_training, lambda: tf.minimum(k, 250), lambda: k)
+    k = tf.minimum(k, 250)
     predicted_mention_indices = coref_ops.extract_mentions(candidate_mention_scores, candidate_starts, candidate_ends, k) # ([k], [k])
     predicted_mention_indices.set_shape([None])
 
@@ -750,9 +751,17 @@ class CorefModel(object):
       # mention_to_predicted[mention] = predicted_cluster
 
     predicted_clusters = [tuple(pc) for pc in predicted_clusters]
-    mention_to_predicted = { m:predicted_clusters[cluster_dict[i]] for m,i in mention_to_predicted.items() }
+    # pc = []
+    # for cluster in predicted_clusters:
+    #   if len(cluster) > 1:
+    #         pc.append(cluster)
+    mention_to_predicted = { m:predicted_clusters[cluster_dict[i]] for m,i in mention_to_predicted.items() if len(predicted_clusters[cluster_dict[i]]) > 1 }
+    pc = []
+    for cluster in predicted_clusters:
+      if len(cluster) > 1:
+        pc.append(cluster)
 
-    return predicted_clusters, mention_to_predicted
+    return pc, mention_to_predicted
   
   def get_predicted_clusters_raw(self, mention_starts, mention_ends, predicted_antecedents):
     mention_to_predicted = {}

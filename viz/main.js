@@ -129,6 +129,7 @@ function load_example(lines) {
         $("<span>").text(" ").appendTo(text_div);
     });
     render_predicted_clusters($("#predicted-clusters"), data.predicted_clusters, text, data.head_scores);
+    render_predicted_clusters($("#labeled-clusters"), data.clusters, text, data.head_scores);
     render_top_spans($("#top-spans"), data.top_spans, text, data.head_scores);
 
     if (example_num > 0) {
@@ -145,7 +146,7 @@ function load_example(lines) {
 }
 
 $(document).ready(function() {
-    var path = get_param("path");
+    var path = "outputs.txt";
     if(path.length >= 1) {
         if (path[path.length - 1] == "/") {
             // Strip trailing slash if present.

@@ -9,7 +9,7 @@ import random
 
 import numpy as np
 import tensorflow as tf
-import coref_model_gnc as cm
+import coref_model_rgcn as cm
 import util
 
 if __name__ == "__main__":
@@ -28,7 +28,7 @@ if __name__ == "__main__":
   # else:
   #   util.set_gpus([0])
 
-  model = cm.CorefModel(config, 1)
+  model = cm.CorefModel(config)
   saver = tf.train.Saver()
   init_op = tf.global_variables_initializer()
 

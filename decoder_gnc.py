@@ -21,7 +21,7 @@ if __name__ == "__main__":
   config["log_dir"] = util.mkdirs(os.path.join(config["log_root"], name))
 
   util.print_config(config)
-  model = cm.CorefModel(config)
+  model = cm.CorefModel(config, 0)
 
   model.load_eval_data()
 
@@ -35,8 +35,8 @@ if __name__ == "__main__":
     with open(output_filename, "w") as f:
       for example_num, (tensorized_example, example) in enumerate(model.eval_data):
         feed_dict = {i:t for i,t in zip(model.input_tensors, tensorized_example)}
-        _, _, _, mention_starts, mention_ends, antecedents, antecedent_scores, head_scores = session.run(model.predictions + [model.head_scores], feed_dict=feed_dict)
-        predicted_antecedents = model.get_predicted_antecedents(antecedents, antecedent_scores)
+        _, _, _, mention_starts, mention_ends, p, antecedents, antecedent_scores, head_scores = session.run(model.predictions + [model.head_scores], feed_dict=feed_dict)
+        predicted_antecedents = [int(x) for x in list(p[0] - 1)]
         example["predicted_clusters"], _ = model.get_predicted_clusters(mention_starts, mention_ends, predicted_antecedents)
         example["top_spans"] = zip((int(i) for i in mention_starts), (int(i) for i in mention_ends))
         example["head_scores"] = head_scores.tolist()

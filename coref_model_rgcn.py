@@ -6,18 +6,15 @@ import threading
 import numpy as np
 import tensorflow as tf
 
-# import util
-# import util_mr2es as util
-# import util_gru as util
-# import util_entity as util
-# import util_hatt as util
-import util_sr as util
+import util_crgcn as util
 import coref_ops
 import conll
 import metrics
 
+# import util_rgcn as util
+
 class CorefModel(object):
-  def __init__(self, config, training):
+  def __init__(self, config):
     self.config = config
     self.embedding_info = [(emb["size"], emb["lowercase"]) for emb in config["embeddings"]]
     self.embedding_size = sum(size for size, _ in self.embedding_info)
@@ -27,7 +24,6 @@ class CorefModel(object):
     self.max_mention_width = config["max_mention_width"]
     self.genres = { g:i for i,g in enumerate(config["genres"]) }
     self.eval_data = None # Load eval data lazily.
-    self.training = training
 
     input_props = []
     input_props.append((tf.float32, [None, None, self.embedding_size])) # Text embeddings.
@@ -39,10 +35,6 @@ class CorefModel(object):
     input_props.append((tf.int32, [None])) # Gold starts.
     input_props.append((tf.int32, [None])) # Gold ends.
     input_props.append((tf.int32, [None])) # Cluster ids.
-    input_props.append((tf.int32, [None, 100])) # Span labels.
-    input_props.append((tf.int32, [None])) # Span sequence.
-    # input_props.append((tf.int32, [None])) # Tagging sequence
-    # input_props.append((tf.int32, [None])) # Tagging loss label sequence
 
     self.queue_input_tensors = [tf.placeholder(dtype, shape) for dtype, shape in input_props]
     dtypes, shapes = zip(*input_props)
@@ -56,17 +48,13 @@ class CorefModel(object):
     learning_rate = tf.train.exponential_decay(self.config["learning_rate"], self.global_step,
                                                self.config["decay_frequency"], self.config["decay_rate"], staircase=True)
     trainable_params = tf.trainable_variables()
-    gnc_params = tf.trainable_variables("gnc/fw_gnc")
     gradients = tf.gradients(self.loss, trainable_params)
-    gnc_gradients = tf.gradients(self.loss, gnc_params)
     gradients, _ = tf.clip_by_global_norm(gradients, self.config["max_gradient_norm"])
     optimizers = {
       "adam" : tf.train.AdamOptimizer,
       "sgd" : tf.train.GradientDescentOptimizer
     }
     optimizer = optimizers[self.config["optimizer"]](learning_rate)
-    self.trainable_variables = gnc_params
-    self.gradients = gnc_gradients
     self.train_op = optimizer.apply_gradients(zip(gradients, trainable_params), global_step=self.global_step)
 
   def start_enqueue_thread(self, session):
@@ -83,22 +71,15 @@ class CorefModel(object):
       enqueue_thread.daemon = True
       enqueue_thread.start()
 
-  def tensorize_mentions(self, mentions, num_words, cluster_ids, span_seq):
+  def tensorize_mentions(self, mentions):
     if len(mentions) > 0:
       starts, ends = zip(*mentions)
     else:
       starts, ends = [], []
-    # num_spans = span_seq.shape[0]
-    span_labels = np.array([util.one_hot([0] * 100, x) for x in span_seq])
-    return np.array(starts), np.array(ends), span_labels
+    return np.array(starts), np.array(ends)
 
   def tensorize_example(self, example, is_training, oov_counts=None):
     clusters = example["clusters"]
-    # if is_training:
-    span_seq = np.array(example["span_labels"])
-    # else:
-    #   span_seq = np.zeros_like(np.array(example["span_labels"]))
-    # span_seq = np.array(example["span_labels"])
 
     gold_mentions = sorted(tuple(m) for m in util.flatten(clusters))
     gold_mention_map = {m:i for i,m in enumerate(gold_mentions)}
@@ -138,35 +119,14 @@ class CorefModel(object):
     doc_key = example["doc_key"]
     genre = self.genres[doc_key[:2]]
 
-    gold_starts, gold_ends, span_labels = self.tensorize_mentions(gold_mentions, num_words, cluster_ids, span_seq)
+    gold_starts, gold_ends = self.tensorize_mentions(gold_mentions)
 
-    '''
     if is_training and len(sentences) > self.config["max_training_sentences"]:
-      return self.truncate_example(word_emb,
-                                  char_index,
-                                  text_len,
-                                  speaker_ids,
-                                  genre,
-                                  is_training,
-                                  gold_starts,
-                                  gold_ends,
-                                  cluster_ids,
-                                  tag_labels)
+      return self.truncate_example(word_emb, char_index, text_len, speaker_ids, genre, is_training, gold_starts, gold_ends, cluster_ids)
     else:
-    '''
-    return word_emb, char_index, text_len, speaker_ids, genre, is_training, gold_starts, gold_ends, cluster_ids, span_labels, span_seq
+      return word_emb, char_index, text_len, speaker_ids, genre, is_training, gold_starts, gold_ends, cluster_ids
 
-  def truncate_example(self,
-                      word_emb,
-                      char_index,
-                      text_len,
-                      speaker_ids,
-                      genre,
-                      is_training,
-                      gold_starts,
-                      gold_ends,
-                      cluster_ids,
-                      tag_labels):
+  def truncate_example(self, word_emb, char_index, text_len, speaker_ids, genre, is_training, gold_starts, gold_ends, cluster_ids):
     max_training_sentences = self.config["max_training_sentences"]
     num_sentences = word_emb.shape[0]
     assert num_sentences > max_training_sentences
@@ -184,39 +144,13 @@ class CorefModel(object):
     gold_ends = gold_ends[gold_spans] - word_offset
     cluster_ids = cluster_ids[gold_spans]
 
-    tag_labels = np.zeros((num_words, 3))
-    tag_seq = np.zeros(num_words)
-    tag_loss_label = np.zeros(num_words)
-    for s, e in zip(gold_starts, gold_ends):
-      tag_seq[s:e + 1] = np.ones(e - s + 1)
-      tag_seq[s] = 2
-      if e < num_words - 1:
-        span_end = e + 2
-        tag_loss_label[s:span_end] = np.ones(span_end - s)
-        tag_loss_label[s] = 1
-        tag_loss_label[span_end - 1] = 1
-    tag_labels = np.array([util.one_hot(x, y) for x, y in zip(tag_labels, tag_seq)])
+    return word_emb, char_index, text_len, speaker_ids, genre, is_training, gold_starts, gold_ends, cluster_ids
 
-    return word_emb, char_index, text_len, speaker_ids, genre, is_training, gold_starts, gold_ends, cluster_ids, tag_labels, tag_seq, tag_loss_label
-
-  def get_predictions_and_loss(self,
-                              word_emb,
-                              char_index,
-                              text_len,
-                              speaker_ids,
-                              genre,
-                              is_training,
-                              gold_starts,
-                              gold_ends,
-                              cluster_ids,
-                              span_labels,
-                              span_seq):
+  def get_predictions_and_loss(self, word_emb, char_index, text_len, speaker_ids, genre, is_training, gold_starts, gold_ends, cluster_ids):
 
     self.gold_starts = gold_starts
+    self.gold_ends = gold_ends
     self.cluster_ids = cluster_ids
-
-    span_seq_bin = tf.where(tf.greater(span_seq, 0), tf.ones_like(span_seq), tf.zeros_like(span_seq))
-    span_labels_bin = tf.one_hot(span_seq_bin, 2) # [num_mention, 2]
 
     self.dropout = 1 - (tf.to_float(is_training) * self.config["dropout_rate"])
     self.lexical_dropout = 1 - (tf.to_float(is_training) * self.config["lexical_dropout_rate"])
@@ -250,123 +184,41 @@ class CorefModel(object):
     flattened_text_emb = self.flatten_emb_by_sentence(text_emb, text_len_mask) # [num_words]
     self.flattened_sentence_indices = flattened_sentence_indices
 
-    candidate_starts, candidate_ends = coref_ops.regression(
+    candidate_starts, candidate_ends = coref_ops.spans(
       sentence_indices=flattened_sentence_indices,
       max_width=self.max_mention_width)
     candidate_starts.set_shape([None])
     candidate_ends.set_shape([None])
 
     candidate_mention_emb = self.get_mention_emb(flattened_text_emb, text_outputs, candidate_starts, candidate_ends) # [num_candidates, emb]
-    candidate_mention_logits =  self.get_mention_scores(candidate_mention_emb) # [num_mentions, 2]
-
-    # mention_loss = tf.losses.softmax_cross_entropy(span_labels_bin, candidate_mention_logits)
-    # mention_loss = tf.nn.softmax_cross_entropy_with_logits(logits=candidate_mention_logits,
-    #                                                       labels=span_labels_bin)
-    
-    # mention_loss = tf.reduce_sum(mention_loss)
-    # mention_loss = tf.reduce_sum(mention_loss * tf.cast(span_seq_bin, tf.float32))
-
-    candidate_mention_scores = tf.squeeze(tf.gather(tf.transpose(candidate_mention_logits), 1))
-    
-    # candidate_mention_scores = tf.squeeze(candidate_mention_scores, 1) # [num_mentions]
+    candidate_mention_scores =  self.get_mention_scores(candidate_mention_emb) # [num_mentions, 1]
+    candidate_mention_scores = tf.squeeze(candidate_mention_scores, 1) # [num_mentions]
 
     k = tf.to_int32(tf.floor(tf.to_float(tf.shape(text_outputs)[0]) * self.config["mention_ratio"]))
-    # k = tf.cond(is_training, lambda: k, lambda: tf.shape(text_outputs)[0])
-    k = tf.cond(is_training, lambda: tf.minimum(k, 600), lambda: k)
-    # k = tf.minimum(k, 900)
+    k = tf.minimum(k, self.config["max_antecedents"])
     predicted_mention_indices = coref_ops.extract_mentions(candidate_mention_scores, candidate_starts, candidate_ends, k) # ([k], [k])
     predicted_mention_indices.set_shape([None])
 
     mention_starts = tf.gather(candidate_starts, predicted_mention_indices) # [num_mentions]
     mention_ends = tf.gather(candidate_ends, predicted_mention_indices) # [num_mentions]
     mention_emb = tf.gather(candidate_mention_emb, predicted_mention_indices) # [num_mentions, emb]
-    mention_scores = tf.gather(candidate_mention_scores, predicted_mention_indices) # [num_mentions, 1]
+    mention_scores = tf.gather(candidate_mention_scores, predicted_mention_indices) # [num_mentions]
 
     mention_start_emb = tf.gather(text_outputs, mention_starts) # [num_mentions, emb]
     mention_end_emb = tf.gather(text_outputs, mention_ends) # [num_mentions, emb]
     mention_speaker_ids = tf.gather(speaker_ids, mention_starts) # [num_mentions]
 
     max_antecedents = self.config["max_antecedents"]
-    antecedents, antecedent_labels, antecedents_len = coref_ops.antecedents(mention_starts,
-            mention_ends,
-            gold_starts,
-            gold_ends,
-            cluster_ids,
-            max_antecedents * 10) # ([num_mentions, max_ant], [num_mentions, max_ant + 1], [num_mentions]
+    antecedents, antecedent_labels, antecedents_len = coref_ops.antecedents(mention_starts, mention_ends, gold_starts, gold_ends, cluster_ids, max_antecedents) # ([num_mentions, max_ant], [num_mentions, max_ant + 1], [num_mentions]
     antecedents.set_shape([None, None])
     antecedent_labels.set_shape([None, None])
     antecedents_len.set_shape([None])
 
-    antecedent_features = self.get_antecedent_features(mention_emb,
-            mention_scores,
-            antecedents,
-            antecedents_len,
-            mention_starts,
-            mention_ends,
-            mention_speaker_ids,
-            genre_emb) # [num_mentions, max_ant + 1]
-    
-    # antecedent_loss = tf.reduce_sum(self.softmax_loss(antecedent_scores, antecedent_labels))
-    
-    # antecedent_scores = tf.expand_dims(antecedent_scores, 0)
+    antecedent_scores = self.get_antecedent_scores(mention_emb, mention_scores, antecedents, antecedents_len, mention_starts, mention_ends, mention_speaker_ids, genre_emb, k) # [num_mentions, max_ant + 1]
 
-    # mention_loss = tf.losses.softmax_cross_entropy(span_labels_bin, mention_logits)
-    # mention_scores = tf.squeeze(tf.gather(tf.transpose(mention_logits), 1))
-
-    span_emb = tf.expand_dims(mention_emb, 0)
-    # span_labels = tf.gather(span_labels, predicted_mention_indices)
-    span_seq_sorted = coref_ops.tagging(tf.gather(span_seq, predicted_mention_indices))
-    predicted_mention_indices.set_shape([None])
-
-    span_labels = tf.expand_dims(tf.one_hot(span_seq_sorted, 100), 0)
-
-    self.span_labels = tf.reduce_sum(span_labels)
-    self.span_seq = span_seq_sorted
-
-    # text_conv = tf.expand_dims(text_outputs, 0)
-    # text_conv = tf.expand_dims(tf.concat([text_outputs, flattened_text_emb], 1), 0)
-    # text_conv = util.cnn_name(text_conv, [5], 100, 'tag_conv')
-    # text_conv = tf.nn.dropout(text_conv, self.dropout)
-    # self.mention_scores = mention_scores
-
-    outputs = self.gnc_tagging(span_emb, span_labels, span_seq_sorted, mention_scores, antecedent_features, k) # [1, num_words, 100] ?
-    # x = tf.matmul(outputs, tf.zeros([10, 80]))
-
-    logits, new_logits, antecedent_scores = tf.split(outputs, [100, 100, k + 1], 2)
-    self.logits_shape = tf.shape(logits)
-    self.antecedent_scores_shape = tf.shape(antecedent_scores)
-
-    # antecedent_scores = tf.gather(attention[0], tf.range(k))
-
-    predictions = tf.argmax(logits, axis=2) # [1, num_words] ?
-
-    # loss = tf.losses.softmax_cross_entropy(span_labels, tf.squeeze(logits))
-    # loss = tf.reduce_sum(tf.nn.softmax_cross_entropy_with_logits(logits=tf.squeeze(logits), labels=span_labels))
-    # span_seq_expanded = tf.expand_dims(span_seq_sorted, 0)
-    # loss = tf.losses.log_loss(span_labels, tf.squeeze(tf.nn.softmax(logits, dim=2))) + .1 * mention_loss
-    # self.tag_seq = tag_seq
-
-    # tagging_loss = tf.reduce_sum(self.sigmoid_margin(logits, tf.to_float(span_labels), tf.to_float(k)))
-
-    tagging_loss = tf.reduce_sum(self.exp_loss_margin(logits, tf.to_float(span_labels), 2))
-    new_tagging_loss = tf.reduce_sum(self.exp_loss_margin(new_logits, tf.to_float(span_labels), 2))
-
-    antecedent_loss = tf.reduce_sum(self.softmax_loss(antecedent_scores[0], antecedent_labels))
-
-    # antecedent_loss = tf.reduce_sum(self.exp_loss_margin(antecedent_scores[0], antecedent_labels, 1))
-
-    # y = tf.squeeze(tf.nn.softmax(logits, dim=2))
-
-    # loss = -tf.reduce_sum(span_labels * tf.log(y) + (1 - span_labels) * tf.log(1 - y))
-    # loss = -tf.reduce_sum((1 - span_labels) * tf.log(1 - y))
-
-    self.tagging_loss = tagging_loss + new_tagging_loss
-    # self.mention_loss = mention_loss
-    self.antecedent_loss = antecedent_loss
-
-    loss = self.tagging_loss + antecedent_loss # + mention_loss
-    
-    self.p = predictions
+    loss = self.softmax_loss(antecedent_scores, antecedent_labels) # [num_mentions]
+    # loss = self.exp_loss_margin(antecedent_scores, antecedent_labels) # [num_mentions]
+    loss = tf.reduce_sum(loss) # []
 
     return [
             candidate_starts,
@@ -374,147 +226,9 @@ class CorefModel(object):
             candidate_mention_scores,
             mention_starts,
             mention_ends,
-            predictions,
             antecedents,
-            antecedent_scores[0]
+            antecedent_scores
           ], loss
-    # return predictions, tf.reduce_sum(tf.multiply(tf.to_float(tag_loss_label), loss))
-  
-  def sigmoid_margin(self, logits, span_labels, k):
-    y = tf.nn.sigmoid(logits)
-    return (1 - y) * span_labels + y * (1 - span_labels)
-  
-  def softmax_margin(self, logits, span_labels, k):
-    y = tf.nn.softmax(logits, dim=2)
-    return (1 - y) * span_labels + y * (1 - span_labels)
-  
-  def tag_loss(self, logits, span_labels):
-    gold_scores = logits + tf.log(span_labels)
-    marginalized_gold_scores = tf.reduce_logsumexp(gold_scores, [2])
-    # self.marginalized_gold_scores = tf.reduce_sum(marginalized_gold_scores)
-    log_norm = tf.reduce_logsumexp(logits, [2])
-    # self.log_norm = log_norm
-    return log_norm - marginalized_gold_scores
-
-  def exp_loss_margin(self, logits, span_labels, d):
-    gold_scores = logits + tf.log(tf.to_float(span_labels))
-    reverse_gold_scores = tf.where(tf.is_inf(logits), logits, -1 * logits) + tf.log(tf.to_float(span_labels))
-
-    marginalized_gold_scores = tf.reduce_logsumexp(gold_scores, [d])
-    marginalized_reverse_gold_scores = tf.reduce_logsumexp(reverse_gold_scores, [d])
-    mask = tf.zeros_like(marginalized_reverse_gold_scores)
-
-    log_norm = tf.reduce_logsumexp(logits, [d])
-
-    # return log_norm - marginalized_gold_scores + marginalized_reverse_gold_scores
-    return log_norm - marginalized_gold_scores + tf.maximum(marginalized_reverse_gold_scores, mask)
-  
-  def margin_loss(self, logits, span_labels, d):
-    gold_scores = tf.reduce_max(logits + tf.log(tf.to_float(span_labels)), [d]) + 1
-    pred_scores = tf.reduce_max(logits, [d])
-
-    return pred_scores - gold_scores
-
-  def exp_loss_combine(self, logits, span_labels, d):
-    gold_scores = logits + tf.log(tf.to_float(span_labels))
-
-    gold_positive = tf.where(tf.greater(gold_scores, tf.zeros_like(gold_scores)),
-                tf.negative(gold_scores),
-                tf.log(tf.zeros_like(gold_scores)))
-
-    gold_negative = tf.where(tf.greater(gold_scores, tf.zeros_like(gold_scores)),
-                tf.zeros_like(gold_scores),
-                gold_scores)
-
-    reverse_gold_negative = tf.where(tf.is_inf(gold_negative), gold_negative, -1 * gold_negative)
-
-    marginalized_gold_scores = tf.reduce_logsumexp(gold_scores, [d])
-
-    marginalized_negtive = tf.reduce_logsumexp(reverse_gold_negative, [d]) + 1
-    marginalized_positive = tf.reduce_sum(tf.exp(gold_positive), [d])
-
-    marginalized_reverse_gold_scores = marginalized_negtive + marginalized_positive
-
-    log_norm = tf.reduce_logsumexp(logits, [d])
-
-    # self.positive = tf.reduce_sum(marginalized_positive)
-    # self.negative = tf.reduce_sum(marginalized_negtive)
-
-    return log_norm - marginalized_gold_scores + marginalized_reverse_gold_scores
-  
-  def gnc_tagging(self, text_emb, span_labels, span_seq, mention_scores, antecedent_features, k):
-    num_sentences = tf.shape(text_emb)[0]
-    max_sentence_length = tf.gather(tf.shape(text_emb), [1])
-
-    # Transpose before and after for efficiency.
-    inputs = tf.transpose(text_emb, [1, 0, 2]) # [max_sentence_length, num_sentences, emb]
-
-    with tf.variable_scope("gnc_cell"):
-      self.cell_fw = util.RecurrentMemNNCell(self.config["lstm_size"], num_sentences, self.dropout, span_labels, span_seq, self.training, k)
-      preprocessed_inputs_fw = self.cell_fw.preprocess_input(inputs, mention_scores, antecedent_features)
-      input_scores = tf.reshape(mention_scores, [-1, 1, 1])
-      preprocessed_inputs_fw = tf.concat([preprocessed_inputs_fw, input_scores], 2)
-      
-    state_fw = tf.contrib.rnn.LSTMStateTuple(tf.tile(self.cell_fw.initial_state.c, [num_sentences, 1]), tf.tile(self.cell_fw.initial_state.h, [num_sentences, 1]))
-    with tf.variable_scope("gnc"):
-      with tf.variable_scope("fw_gnc"):
-        fw_outputs, self.fw_state = tf.nn.dynamic_rnn(cell=self.cell_fw,
-                                        inputs=preprocessed_inputs_fw,
-                                        sequence_length=max_sentence_length,
-                                        initial_state=state_fw,
-                                        time_major=True)
-       #  print 3
-
-    # text_outputs = tf.concat([fw_outputs, bw_outputs], 2)
-    # self.mention_scores = tf.shape(self.cell_fw.scores_tiled)
-    text_outputs = tf.transpose(fw_outputs, [1, 0, 2]) # [num_sentences, max_sentence_length, emb]
-    return text_outputs
-  
-  def get_antecedent_features(self,
-                            mention_emb,
-                            mention_scores,
-                            antecedents,
-                            antecedents_len,
-                            mention_starts,
-                            mention_ends,
-                            mention_speaker_ids,
-                            genre_emb):
-    num_mentions = util.shape(mention_emb, 0)
-    max_antecedents = util.shape(antecedents, 1)
-
-    feature_emb_list = []
-
-    if self.config["use_metadata"]:
-      antecedent_speaker_ids = tf.gather(mention_speaker_ids, antecedents) # [num_mentions, max_ant]
-      same_speaker = tf.equal(tf.expand_dims(mention_speaker_ids, 1), antecedent_speaker_ids) # [num_mentions, max_ant]
-      speaker_pair_emb = tf.gather(tf.get_variable("same_speaker_emb", [2, self.config["feature_size"]]), tf.to_int32(same_speaker)) # [num_mentions, max_ant, emb]
-      feature_emb_list.append(speaker_pair_emb)
-
-      tiled_genre_emb = tf.tile(tf.expand_dims(tf.expand_dims(genre_emb, 0), 0), [num_mentions, max_antecedents, 1]) # [num_mentions, max_ant, emb]
-      feature_emb_list.append(tiled_genre_emb)
-
-    if self.config["use_features"]:
-      target_indices = tf.range(num_mentions) # [num_mentions]
-      mention_distance = tf.expand_dims(target_indices, 1) - antecedents # [num_mentions, max_ant]
-      mention_distance_bins = coref_ops.distance_bins(mention_distance) # [num_mentions, max_ant]
-      mention_distance_bins.set_shape([None, None])
-      mention_distance_emb = tf.gather(tf.get_variable("mention_distance_emb", [10, self.config["feature_size"]]), mention_distance_bins) # [num_mentions, max_ant]
-      feature_emb_list.append(mention_distance_emb)
-
-    feature_emb = tf.concat(feature_emb_list, 2) # [num_mentions, max_ant, emb]
-    feature_emb = tf.nn.dropout(feature_emb, self.dropout) # [num_mentions, max_ant, emb]
-
-    return feature_emb  # [num_mentions, max_ant + 1]
-  
-  def get_mention_prob(self, tag_prob, mention_start, mention_end, sentence_length):
-    mention_prob = tag_prob[2][mention_start]
-    mention_width = 1.0 + mention_end - mention_start
-    mention_indices = tf.range(mention_start + 1, mention_end + 1)
-    mention_prob += tf.reduce_sum(tf.gather(tag_prob[1], mention_indices))
-    if mention_end < sentence_length - 1:
-      mention_prob += 1 - tag_prob[1][mention_end + 1]
-      mention_width += 1
-    return mention_prob / mention_width
 
   def get_mention_emb(self, text_emb, text_outputs, mention_starts, mention_ends):
     mention_emb_list = []
@@ -548,9 +262,15 @@ class CorefModel(object):
 
   def get_mention_scores(self, mention_emb):
     with tf.variable_scope("mention_scores"):
-      return util.ffnn(mention_emb, self.config["ffnn_depth"], self.config["ffnn_size"], 2, self.dropout) # [num_mentions, 2]
+      return util.ffnn(mention_emb, self.config["ffnn_depth"], self.config["ffnn_size"], 1, self.dropout) # [num_mentions, 1]
 
   def softmax_loss(self, antecedent_scores, antecedent_labels):
+    gold_scores = antecedent_scores + tf.log(tf.to_float(antecedent_labels)) # [num_mentions, max_ant + 1]
+    marginalized_gold_scores = tf.reduce_logsumexp(gold_scores, [1]) # [num_mentions]
+    log_norm = tf.reduce_logsumexp(antecedent_scores, [1]) # [num_mentions]
+    return log_norm - marginalized_gold_scores # [num_mentions]
+
+  def softmax_loss_graph(self, antecedent_scores, antecedent_labels):
     gold_scores = antecedent_scores + tf.log(tf.to_float(antecedent_labels)) # [num_mentions, max_ant + 1]
     marginalized_gold_scores = tf.reduce_logsumexp(gold_scores, [1]) # [num_mentions]
     log_norm = tf.reduce_logsumexp(antecedent_scores, [1]) # [num_mentions]
@@ -564,7 +284,8 @@ class CorefModel(object):
                             mention_starts,
                             mention_ends,
                             mention_speaker_ids,
-                            genre_emb):
+                            genre_emb,
+                            k):
     num_mentions = util.shape(mention_emb, 0)
     max_antecedents = util.shape(antecedents, 1)
 
@@ -590,6 +311,11 @@ class CorefModel(object):
     feature_emb = tf.concat(feature_emb_list, 2) # [num_mentions, max_ant, emb]
     feature_emb = tf.nn.dropout(feature_emb, self.dropout) # [num_mentions, max_ant, emb]
 
+    span_emb = tf.expand_dims(mention_emb, 0)
+    antecedent_scores = self.rgcn_tagging(span_emb, mention_scores, feature_emb, k) # [1, num_words, 100] ?
+    self.scores = antecedent_scores
+
+    '''
     antecedent_emb = tf.gather(mention_emb, antecedents) # [num_mentions, max_ant, emb]
     self.mention_emb_shape = tf.shape(mention_emb)
     self.mention_start_shape = tf.shape(antecedents)
@@ -606,10 +332,52 @@ class CorefModel(object):
     antecedent_mask = tf.log(tf.sequence_mask(antecedents_len, max_antecedents, dtype=tf.float32)) # [num_mentions, max_ant]
     antecedent_scores += antecedent_mask # [num_mentions, max_ant]
 
-    # antecedent_scores += tf.expand_dims(mention_scores, 1) + tf.gather(mention_scores, antecedents) # [num_mentions, max_ant]
+    antecedent_scores += tf.expand_dims(mention_scores, 1) + tf.gather(mention_scores, antecedents) # [num_mentions, max_ant]
     antecedent_scores = tf.concat([tf.zeros([util.shape(mention_scores, 0), 1]), antecedent_scores], 1) # [num_mentions, max_ant + 1]
+    '''
     return antecedent_scores  # [num_mentions, max_ant + 1]
+  
+  def rgcn_tagging(self, text_emb, mention_scores, antecedent_features, k):
+    num_sentences = tf.shape(text_emb)[0]
+    max_sentence_length = tf.gather(tf.shape(text_emb), [1])
 
+    # Transpose before and after for efficiency.
+    inputs = tf.transpose(text_emb, [1, 0, 2]) # [max_sentence_length, num_sentences, emb]
+
+    with tf.variable_scope("rgcn_cell"):
+      self.cell_fw = util.RecurrentMemNNCell(inputs, self.config["lstm_size"], num_sentences, self.dropout, mention_scores, antecedent_features, k)
+      # self.hist_shape = self.cell_fw.hist_shape
+      preprocessed_inputs_fw = self.cell_fw.preprocess_input(inputs, mention_scores, antecedent_features)
+      input_scores = tf.reshape(mention_scores, [-1, 1, 1])
+      preprocessed_inputs_fw = tf.concat([preprocessed_inputs_fw, input_scores], 2)
+      
+    state_fw = tf.contrib.rnn.LSTMStateTuple(tf.tile(self.cell_fw.initial_state.c, [num_sentences, 1]), tf.tile(self.cell_fw.initial_state.h, [num_sentences, 1]))
+    with tf.variable_scope("rgcn"):
+      with tf.variable_scope("fw_rgcn"):
+        fw_outputs, self.fw_state = tf.nn.dynamic_rnn(cell=self.cell_fw,
+                                        inputs=preprocessed_inputs_fw,
+                                        sequence_length=max_sentence_length,
+                                        initial_state=state_fw,
+                                        time_major=True)
+       #  print 3
+
+    # text_outputs = tf.concat([fw_outputs, bw_outputs], 2)
+    # self.mention_scores = tf.shape(self.cell_fw.scores_tiled)
+    text_outputs = tf.transpose(fw_outputs, [1, 0, 2])[0] # [num_sentences, max_sentence_length, emb]
+    return text_outputs
+  
+  def exp_loss_margin(self, logits, span_labels):
+    gold_scores = logits + tf.log(tf.to_float(span_labels))
+    reverse_gold_scores = tf.where(tf.is_inf(logits), logits, -1 * logits) + tf.log(tf.to_float(span_labels))
+
+    marginalized_gold_scores = tf.reduce_logsumexp(gold_scores, [1])
+    marginalized_reverse_gold_scores = tf.reduce_logsumexp(reverse_gold_scores, [1])
+    mask = tf.zeros_like(marginalized_reverse_gold_scores) - 1
+
+    log_norm = tf.reduce_logsumexp(logits, [1])
+
+    # return log_norm - marginalized_gold_scores + marginalized_reverse_gold_scores
+    return log_norm - marginalized_gold_scores + tf.maximum(marginalized_reverse_gold_scores, mask)
 
   def flatten_emb_by_sentence(self, emb, text_len_mask):
     num_sentences = tf.shape(emb)[0]
@@ -623,27 +391,6 @@ class CorefModel(object):
     else:
       raise ValueError("Unsupported rank: {}".format(emb_rank))
     return tf.boolean_mask(flattened_emb, text_len_mask)
-  
-  def encode_sentences_unilstm(self, text_conv):
-    num_sentences = tf.shape(text_conv)[0]
-    max_sentence_length = tf.shape(text_conv)[1]
-
-    # Transpose before and after for efficiency.
-    inputs = tf.transpose(text_conv, [1, 0, 2]) # [max_sentence_length, num_sentences, emb]
-
-    with tf.variable_scope("fw_cell_uni"):
-      cell_fw = util.CustomLSTMCell(self.config["lstm_size"], num_sentences, self.dropout)
-      preprocessed_inputs_fw = cell_fw.preprocess_input(inputs)
-    state_fw = tf.contrib.rnn.LSTMStateTuple(tf.tile(cell_fw.initial_state.c, [num_sentences, 1]), tf.tile(cell_fw.initial_state.h, [num_sentences, 1]))
-    with tf.variable_scope("lstm_uni"):
-      with tf.variable_scope("fw_lstm_uni"):
-        fw_outputs, fw_states = tf.nn.dynamic_rnn(cell=cell_fw,
-                                                  inputs=preprocessed_inputs_fw,
-                                                  initial_state=state_fw,
-                                                  time_major=True)
-
-    text_outputs = tf.transpose(fw_outputs, [1, 0, 2]) # [num_sentences, max_sentence_length, emb]
-    return text_outputs
 
   def encode_sentences(self, text_emb, text_len, text_len_mask):
     num_sentences = tf.shape(text_emb)[0]
@@ -651,6 +398,7 @@ class CorefModel(object):
 
     # Transpose before and after for efficiency.
     inputs = tf.transpose(text_emb, [1, 0, 2]) # [max_sentence_length, num_sentences, emb]
+    # inputs = tf.unstack(inputs, axis = 0)
 
     with tf.variable_scope("fw_cell"):
       cell_fw = util.CustomLSTMCell(self.config["lstm_size"], num_sentences, self.dropout)
@@ -728,35 +476,6 @@ class CorefModel(object):
     return predicted_antecedents
 
   def get_predicted_clusters(self, mention_starts, mention_ends, predicted_antecedents):
-    cluster_dict = {}
-    mention_to_predicted = {}
-    predicted_clusters = []
-    for i, predicted_entity in enumerate(predicted_antecedents):
-      if predicted_entity < 0:
-        continue
-      # assert i > predicted_index
-      current_mention = (int(mention_starts[i]), int(mention_ends[i]))
-      mention_to_predicted[current_mention] = predicted_entity
-
-      if predicted_entity in cluster_dict:
-        predicted_cluster = cluster_dict[predicted_entity]
-        predicted_clusters[predicted_cluster].append(current_mention)
-      else:
-        predicted_cluster = len(predicted_clusters)
-        predicted_clusters.append([current_mention])
-        cluster_dict[predicted_entity] = predicted_cluster
-        # mention_to_predicted[predicted_antecedent] = predicted_cluster
-
-      # mention = (int(mention_starts[i]), int(mention_ends[i]))
-      # predicted_clusters[predicted_cluster].append(mention)
-      # mention_to_predicted[mention] = predicted_cluster
-
-    predicted_clusters = [tuple(pc) for pc in predicted_clusters]
-    mention_to_predicted = { m:predicted_clusters[cluster_dict[i]] for m,i in mention_to_predicted.items() }
-
-    return predicted_clusters, mention_to_predicted
-  
-  def get_predicted_clusters_raw(self, mention_starts, mention_ends, predicted_antecedents):
     mention_to_predicted = {}
     predicted_clusters = []
     for i, predicted_index in enumerate(predicted_antecedents):
@@ -790,17 +509,6 @@ class CorefModel(object):
     predicted_clusters, mention_to_predicted = self.get_predicted_clusters(mention_starts, mention_ends, predicted_antecedents)
     evaluator.update(predicted_clusters, gold_clusters, mention_to_predicted, mention_to_gold)
     return predicted_clusters
-  
-  def evaluate_coref_raw(self, mention_starts, mention_ends, predicted_antecedents, gold_clusters, evaluator):
-    gold_clusters = [tuple(tuple(m) for m in gc) for gc in gold_clusters]
-    mention_to_gold = {}
-    for gc in gold_clusters:
-      for mention in gc:
-        mention_to_gold[mention] = gc
-
-    predicted_clusters, mention_to_predicted = self.get_predicted_clusters_raw(mention_starts, mention_ends, predicted_antecedents)
-    evaluator.update(predicted_clusters, gold_clusters, mention_to_predicted, mention_to_gold)
-    return predicted_clusters
 
   def load_eval_data(self):
     if self.eval_data is None:
@@ -832,79 +540,14 @@ class CorefModel(object):
     coref_evaluator = metrics.CorefEvaluator()
 
     for example_num, (tensorized_example, example) in enumerate(self.eval_data):
-      _, _, _, _, _, _, gold_starts, gold_ends,  cluster_ids, span_labels, span_seq = tensorized_example
+      _, _, _, _, _, _, gold_starts, gold_ends, _ = tensorized_example
       feed_dict = {i:t for i,t in zip(self.input_tensors, tensorized_example)}
-      [candidate_starts, candidate_ends, mention_scores, mention_starts, mention_ends, p, _, _], labels, predictions = session.run([self.predictions, self.span_seq, self.p], feed_dict=feed_dict)
-
-      self.evaluate_mentions(candidate_starts, candidate_ends, mention_starts, mention_ends, mention_scores, gold_starts, gold_ends, example, mention_evaluators)
-      # predicted_antecedents = self.get_predicted_antecedents(antecedents, antecedent_scores)
-      predicted_antecedents = [int(x) for x in list(p[0] - 1)]
-
-      coref_predictions[example["doc_key"]] = self.evaluate_coref(mention_starts, mention_ends, predicted_antecedents, example["clusters"], coref_evaluator)
-
-      if example_num % 10 == 0:
-        print "Evaluated {}/{} examples.".format(example_num + 1, len(self.eval_data))
-        print util.check_tags(predicted_antecedents)
-        print max(predicted_antecedents)
-        print list(labels)
-        print list(predictions[0])
-        # print state
-        # print tag_outputs
-        # print tag_seq
-
-    summary_dict = {}
-    for k, evaluator in sorted(mention_evaluators.items(), key=operator.itemgetter(0)):
-      tags = ["{} @ {}".format(t, _k_to_tag(k)) for t in ("R", "P", "F")]
-      results_to_print = []
-      for t, v in zip(tags, evaluator.metrics()):
-        results_to_print.append("{:<10}: {:.2f}".format(t, v))
-        summary_dict[t] = v
-      print ", ".join(results_to_print)
-
-    conll_results = conll.evaluate_conll(self.config["conll_eval_path"], coref_predictions, official_stdout)
-    average_f1 = sum(results["f"] for results in conll_results.values()) / len(conll_results)
-    summary_dict["Average F1 (conll)"] = average_f1
-    print "Average F1 (conll): {:.2f}%".format(average_f1)
-
-    p,r,f = coref_evaluator.get_prf()
-    summary_dict["Average F1 (py)"] = f
-    print "Average F1 (py): {:.2f}%".format(f * 100)
-    summary_dict["Average precision (py)"] = p
-    print "Average precision (py): {:.2f}%".format(p * 100)
-    summary_dict["Average recall (py)"] = r
-    print "Average recall (py): {:.2f}%".format(r * 100)
-
-    return util.make_summary(summary_dict), average_f1
-  
-  def evaluate_raw(self, session, official_stdout=False):
-    self.load_eval_data()
-
-    def _k_to_tag(k):
-      if k == -3:
-        return "oracle"
-      elif k == -2:
-        return "actual"
-      elif k == -1:
-        return "exact"
-      elif k == 0:
-        return "threshold"
-      else:
-        return "{}%".format(k)
-    mention_evaluators = { k:util.RetrievalEvaluator() for k in [-3, -2, -1, 0, 10, 15, 20, 25, 30, 40, 50] }
-
-    coref_predictions = {}
-    coref_evaluator = metrics.CorefEvaluator()
-
-    for example_num, (tensorized_example, example) in enumerate(self.eval_data):
-      _, _, _, _, _, _, gold_starts, gold_ends,  cluster_ids, span_labels, span_seq = tensorized_example
-      feed_dict = {i:t for i,t in zip(self.input_tensors, tensorized_example)}
-      # candidate_starts, candidate_ends, mention_scores, mention_starts, mention_ends, antecedents, antecedent_scores = session.run(self.predictions, feed_dict=feed_dict)
-      candidate_starts, candidate_ends, mention_scores, mention_starts, mention_ends, p, antecedents, antecedent_scores = session.run(self.predictions, feed_dict=feed_dict)
+      candidate_starts, candidate_ends, mention_scores, mention_starts, mention_ends, antecedents, antecedent_scores = session.run(self.predictions, feed_dict=feed_dict)
 
       self.evaluate_mentions(candidate_starts, candidate_ends, mention_starts, mention_ends, mention_scores, gold_starts, gold_ends, example, mention_evaluators)
       predicted_antecedents = self.get_predicted_antecedents(antecedents, antecedent_scores)
 
-      coref_predictions[example["doc_key"]] = self.evaluate_coref_raw(mention_starts, mention_ends, predicted_antecedents, example["clusters"], coref_evaluator)
+      coref_predictions[example["doc_key"]] = self.evaluate_coref(mention_starts, mention_ends, predicted_antecedents, example["clusters"], coref_evaluator)
 
       if example_num % 10 == 0:
         print "Evaluated {}/{} examples.".format(example_num + 1, len(self.eval_data))
