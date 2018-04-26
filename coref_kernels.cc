@@ -194,43 +194,6 @@ public:
         }
         cached = 0;
       }
-
-      /*
-      if (tag_seq(i) == 0 && i != length - 1) {cspan_type = 0; continue;}
-
-      cscore = tag_high(i);
-
-      if (tag_seq(i) == 2) {
-        if (num_mention > 0) {
-          spans.emplace_back(cspan_start, cspan_end);
-          scores.emplace_back(score / span_length);
-        }
-        score = cscore;
-        span_length = 1;
-        cspan_start = i;
-        cspan_end = i;
-        cspan_type = 1;
-        num_mention += 1;
-        if (i == length - 1) {
-          spans.emplace_back(cspan_start, cspan_end);
-          scores.emplace_back(cscore);
-        }
-      }
-      else if (tag_seq(i) == 1 && cspan_type == 1) {
-        score += cscore;
-        span_length += 1;
-        cspan_end = i;
-        // nspan_type = 1 - cspan_type;
-        if (i == length - 1) {
-          spans.emplace_back(cspan_start, i);
-          scores.emplace_back(score / span_length);
-        }
-      }
-      else if (i == length - 1) {
-        spans.emplace_back(cspan_start, cspan_end);
-        scores.emplace_back(score / span_length);
-      }
-      */
     }
 
     if (cached == 1) {

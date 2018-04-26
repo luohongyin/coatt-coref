@@ -9,7 +9,7 @@ import random
 
 import numpy as np
 import tensorflow as tf
-import coref_model_rgcn as cm
+import coref_model_gcn as cm
 import util_rgcn as util
 
 if __name__ == "__main__":
@@ -49,8 +49,8 @@ if __name__ == "__main__":
     accumulated_loss = 0.0
     initial_time = time.time()
     while not sv.should_stop():
-      tf_loss, tf_global_step, _, scores = session.run([model.loss, model.global_step, model.train_op,
-                                                          model.scores,
+      tf_loss, tf_global_step, _ = session.run([model.loss, model.global_step, model.train_op,
+                                                          # model.scores,
                                                           ])
       accumulated_loss += tf_loss
       # print tf_loss

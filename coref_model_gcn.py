@@ -214,8 +214,22 @@ class CorefModel(object):
     antecedent_labels.set_shape([None, None])
     antecedents_len.set_shape([None])
 
-    antecedent_scores = self.get_antecedent_scores(mention_emb, mention_scores, antecedents, antecedents_len, mention_starts, mention_ends, mention_speaker_ids, genre_emb, k) # [num_mentions, max_ant + 1]
+    A = tf.eye(k)
 
+    with tf.variable_scope("layer_1"):
+      antecedent_scores_1 = self.get_antecedent_scores(mention_emb, mention_scores, antecedents, antecedents_len, mention_starts, mention_ends, mention_speaker_ids, genre_emb, k) # [num_mentions, max_ant + 1]
+      DAD_1 = self.get_DAD(A, antecedent_scores_1, k)
+      mention_emb_1 = tf.nn.relu(util.projection(tf.matmul(DAD_1, mention_emb), 200))
+
+    with tf.variable_scope("layer_2"):
+      antecedent_scores_2 = self.get_antecedent_scores(mention_emb_1, mention_scores, antecedents, antecedents_len, mention_starts, mention_ends, mention_speaker_ids, genre_emb, k) # [num_mentions, max_ant + 1]
+      DAD_2 = self.get_DAD(A, antecedent_scores_2, k)
+      mention_emb_2 = tf.nn.relu(util.projection(tf.matmul(DAD_2, mention_emb), 200))
+    
+    with tf.variable_scope("layer_3"):
+      antecedent_scores = self.get_antecedent_scores(mention_emb_2, mention_scores, antecedents, antecedents_len, mention_starts, mention_ends, mention_speaker_ids, genre_emb, k) # [num_mentions, max_ant + 1]
+
+    antecedent_scores += antecedent_scores_1
     loss = self.softmax_loss(antecedent_scores, antecedent_labels) # [num_mentions]
     # loss = self.exp_loss_margin(antecedent_scores, antecedent_labels) # [num_mentions]
     loss = tf.reduce_sum(loss) # []
@@ -229,6 +243,14 @@ class CorefModel(object):
             antecedents,
             antecedent_scores
           ], loss
+  
+  def get_DAD(self, A, antecedent_scores, k):
+    att = tf.nn.softmax(antecedent_scores, dim=1)
+    _, att = tf.split(att, [1, k], 1)
+    new_A = A + att + tf.transpose(att)
+    D = tf.diag(tf.sqrt(1 / tf.reduce_sum(new_A, axis=1)))
+    DAD = tf.matmul(tf.matmul(D, new_A), D)
+    return DAD
 
   def get_mention_emb(self, text_emb, text_outputs, mention_starts, mention_ends):
     mention_emb_list = []
@@ -311,11 +333,11 @@ class CorefModel(object):
     feature_emb = tf.concat(feature_emb_list, 2) # [num_mentions, max_ant, emb]
     feature_emb = tf.nn.dropout(feature_emb, self.dropout) # [num_mentions, max_ant, emb]
 
-    span_emb = tf.expand_dims(mention_emb, 0)
-    antecedent_scores = self.rgcn_tagging(span_emb, mention_scores, feature_emb, k) # [1, num_words, 100] ?
-    self.scores = antecedent_scores
+    # span_emb = tf.expand_dims(mention_emb, 0)
+    # antecedent_scores = self.rgcn_tagging(span_emb, mention_scores, feature_emb, k) # [1, num_words, 100] ?
+    # self.scores = antecedent_scores
 
-    '''
+    # '''
     antecedent_emb = tf.gather(mention_emb, antecedents) # [num_mentions, max_ant, emb]
     self.mention_emb_shape = tf.shape(mention_emb)
     self.mention_start_shape = tf.shape(antecedents)
@@ -334,7 +356,7 @@ class CorefModel(object):
 
     antecedent_scores += tf.expand_dims(mention_scores, 1) + tf.gather(mention_scores, antecedents) # [num_mentions, max_ant]
     antecedent_scores = tf.concat([tf.zeros([util.shape(mention_scores, 0), 1]), antecedent_scores], 1) # [num_mentions, max_ant + 1]
-    '''
+    # '''
     return antecedent_scores  # [num_mentions, max_ant + 1]
   
   def rgcn_tagging(self, text_emb, mention_scores, antecedent_features, k):

@@ -381,6 +381,8 @@ class RecurrentMemNNCell(tf.contrib.rnn.RNNCell):
       # entity_mention_score = tf.tile(current_score, [100, 1]) * self.scores_mask
 
       sentence_emb = tf.reshape(memories, [self.k, self.hidden_size])
+      with tf.variable_scope("entity_emb"):
+        entity_emb = tf.nn.relu(projection(sentence_emb, self.hidden_size))
 
       word_index = tf.reshape(tf.cast(index, tf.int64), [1])
       # entity_index = tf.cast(tf.gather(cell, [1]), tf.int64)
@@ -388,8 +390,13 @@ class RecurrentMemNNCell(tf.contrib.rnn.RNNCell):
       pair_feature = tf.gather(self.antecedent_features, word_index)[0]
 
       inputs_tiled = tf.tile(inputs, [self.num_words - 1, 1])
+      similarity_emb = inputs_tiled * self.span_emb
 
-      pair_emb = tf.concat([pair_feature, inputs_tiled, sentence_emb, self.span_emb], 1)
+      entity_sim_emb = inputs_tiled * entity_emb
+
+      # pair_emb = tf.concat([pair_feature, inputs_tiled, entity_emb, self.span_emb, similarity_emb], 1)
+      pair_emb = tf.concat([pair_feature, inputs_tiled, entity_emb, self.span_emb, similarity_emb, entity_sim_emb], 1)
+      # pair_emb = tf.concat([pair_feature, inputs_tiled, self.span_emb], 1)
 
       # mention_att = projection_name(pair_emb, 1, 'context_att') + self.mention_scores + context_mention_score
       mention_att = ffnn_name(pair_emb, 2, 150, 1, 'context_att', self._dropout) + self.mention_scores + context_mention_score

@@ -184,6 +184,18 @@ class CorefModel(object):
     flattened_text_emb = self.flatten_emb_by_sentence(text_emb, text_len_mask) # [num_words]
     self.flattened_sentence_indices = flattened_sentence_indices
 
+    word_nemb = tf.concat([text_outputs, flattened_text_emb], 1)
+    with tf.variable_scope("conv_score"):
+      nemb_size = util.shape(word_nemb, 1)
+      w = tf.get_variable("w", [3, nemb_size, 150])
+      b = tf.get_variable("b", [150])
+      conv = tf.nn.conv1d(word_nemb, w, stride=1, padding="SAME")
+      h = tf.nn.relu(tf.nn.bias_add(conv, b))
+      candidate_word_scores = util.projection(h, 2)
+      start_scores, end_scores = tf.split(candidate_word_scores, [1, 1], 1)
+      start_scores = tf.reshape(start_scores, [-1])
+      end_scores = tf.reshape(end_scores, [-1])
+
     candidate_starts, candidate_ends = coref_ops.spans(
       sentence_indices=flattened_sentence_indices,
       max_width=self.max_mention_width)
@@ -193,6 +205,7 @@ class CorefModel(object):
     candidate_mention_emb = self.get_mention_emb(flattened_text_emb, text_outputs, candidate_starts, candidate_ends) # [num_candidates, emb]
     candidate_mention_scores =  self.get_mention_scores(candidate_mention_emb) # [num_mentions, 1]
     candidate_mention_scores = tf.squeeze(candidate_mention_scores, 1) # [num_mentions]
+    candidate_mention_scores += tf.gather(start_scores, candidate_starts) + tf.gather(end_scores, candidate_ends)
 
     k = tf.to_int32(tf.floor(tf.to_float(tf.shape(text_outputs)[0]) * self.config["mention_ratio"]))
     k = tf.minimum(k, self.config["max_antecedents"])
@@ -203,18 +216,30 @@ class CorefModel(object):
     mention_ends = tf.gather(candidate_ends, predicted_mention_indices) # [num_mentions]
     mention_emb = tf.gather(candidate_mention_emb, predicted_mention_indices) # [num_mentions, emb]
     mention_scores = tf.gather(candidate_mention_scores, predicted_mention_indices) # [num_mentions]
+    word_scores = tf.gather(candidate_word_scores, predicted_mention_indices)
 
     mention_start_emb = tf.gather(text_outputs, mention_starts) # [num_mentions, emb]
     mention_end_emb = tf.gather(text_outputs, mention_ends) # [num_mentions, emb]
     mention_speaker_ids = tf.gather(speaker_ids, mention_starts) # [num_mentions]
 
     max_antecedents = self.config["max_antecedents"]
-    antecedents, antecedent_labels, antecedents_len = coref_ops.antecedents(mention_starts, mention_ends, gold_starts, gold_ends, cluster_ids, max_antecedents) # ([num_mentions, max_ant], [num_mentions, max_ant + 1], [num_mentions]
+    antecedents, antecedent_labels, antecedents_len = coref_ops.antecedents(mention_starts, mention_ends, gold_starts, gold_ends, cluster_ids, k) # ([num_mentions, max_ant], [num_mentions, max_ant + 1], [num_mentions]
     antecedents.set_shape([None, None])
     antecedent_labels.set_shape([None, None])
     antecedents_len.set_shape([None])
 
-    antecedent_scores = self.get_antecedent_scores(mention_emb, mention_scores, antecedents, antecedents_len, mention_starts, mention_ends, mention_speaker_ids, genre_emb, k) # [num_mentions, max_ant + 1]
+    antecedent_scores = self.get_antecedent_scores(mention_emb,
+      word_nemb,
+      mention_scores,
+      antecedents,
+      antecedents_len,
+      mention_starts,
+      mention_ends,
+      mention_speaker_ids,
+      speaker_ids,
+      genre_emb,
+      k
+    ) # [num_mentions, max_ant + 1]
 
     loss = self.softmax_loss(antecedent_scores, antecedent_labels) # [num_mentions]
     # loss = self.exp_loss_margin(antecedent_scores, antecedent_labels) # [num_mentions]
@@ -278,22 +303,27 @@ class CorefModel(object):
 
   def get_antecedent_scores(self,
                             mention_emb,
+                            word_nemb,
                             mention_scores,
                             antecedents,
                             antecedents_len,
                             mention_starts,
                             mention_ends,
                             mention_speaker_ids,
+                            speaker_ids,
                             genre_emb,
                             k):
     num_mentions = util.shape(mention_emb, 0)
+    num_words = util.shape(word_nemb, 0)
     max_antecedents = util.shape(antecedents, 1)
 
     feature_emb_list = []
 
     if self.config["use_metadata"]:
       antecedent_speaker_ids = tf.gather(mention_speaker_ids, antecedents) # [num_mentions, max_ant]
-      same_speaker = tf.equal(tf.expand_dims(mention_speaker_ids, 1), antecedent_speaker_ids) # [num_mentions, max_ant]
+      word_speaker_ids = tf.tile(tf.extend_dims(speaker_ids, 0), [k, 1])
+      same_speaker = tf.equal(tf.expand_dims(mention_speaker_ids, 1), word_speaker_ids)
+      # same_speaker = tf.equal(tf.expand_dims(mention_speaker_ids, 1), antecedent_speaker_ids) # [num_mentions, max_ant]
       speaker_pair_emb = tf.gather(tf.get_variable("same_speaker_emb", [2, self.config["feature_size"]]), tf.to_int32(same_speaker)) # [num_mentions, max_ant, emb]
       feature_emb_list.append(speaker_pair_emb)
 
@@ -301,8 +331,9 @@ class CorefModel(object):
       feature_emb_list.append(tiled_genre_emb)
 
     if self.config["use_features"]:
-      target_indices = tf.range(num_mentions) # [num_mentions]
-      mention_distance = tf.expand_dims(target_indices, 1) - antecedents # [num_mentions, max_ant]
+      # target_indices = tf.range(num_mentions) # [num_mentions]
+      target_indices = tf.range(num_words) # [num_mentions]
+      mention_distance = tf.tile(tf.expand_dims(mention_starts, 1), [1, num_words]) - tf.expand_dims(target_indices, 1) # [num_mentions, max_ant]
       mention_distance_bins = coref_ops.distance_bins(mention_distance) # [num_mentions, max_ant]
       mention_distance_bins.set_shape([None, None])
       mention_distance_emb = tf.gather(tf.get_variable("mention_distance_emb", [10, self.config["feature_size"]]), mention_distance_bins) # [num_mentions, max_ant]
