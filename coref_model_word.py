@@ -185,13 +185,14 @@ class CorefModel(object):
     self.flattened_sentence_indices = flattened_sentence_indices
 
     word_nemb = tf.concat([text_outputs, flattened_text_emb], 1)
+    # word_nemb = tf.reshape(word_nemb, [tf.shape(text_outputs)[0], tf.shape(text_outputs)[1] + tf.shape(flattened_text_emb)[1]])
     with tf.variable_scope("conv_score"):
-      nemb_size = util.shape(word_nemb, 1)
-      w = tf.get_variable("w", [3, nemb_size, 150])
-      b = tf.get_variable("b", [150])
-      conv = tf.nn.conv1d(word_nemb, w, stride=1, padding="SAME")
-      h = tf.nn.relu(tf.nn.bias_add(conv, b))
-      candidate_word_scores = util.projection(h, 2)
+      # nemb_size = util.shape(word_nemb, 1)
+      # w = tf.get_variable("w", [3, nemb_size, 150])
+      # b = tf.get_variable("b", [150])
+      # conv = tf.nn.conv1d(tf.expand_dims(word_nemb, 0), w, stride=1, padding="SAME")
+      # h = tf.nn.relu(tf.nn.bias_add(conv, b))
+      candidate_word_scores = util.projection(word_nemb, 2)
       start_scores, end_scores = tf.split(candidate_word_scores, [1, 1], 1)
       start_scores = tf.reshape(start_scores, [-1])
       end_scores = tf.reshape(end_scores, [-1])
@@ -215,6 +216,7 @@ class CorefModel(object):
     mention_starts = tf.gather(candidate_starts, predicted_mention_indices) # [num_mentions]
     mention_ends = tf.gather(candidate_ends, predicted_mention_indices) # [num_mentions]
     mention_emb = tf.gather(candidate_mention_emb, predicted_mention_indices) # [num_mentions, emb]
+    # mention_emb = tf.reshape(mention_emb, [k, -1])
     mention_scores = tf.gather(candidate_mention_scores, predicted_mention_indices) # [num_mentions]
     word_scores = tf.gather(candidate_word_scores, predicted_mention_indices)
 
@@ -238,6 +240,8 @@ class CorefModel(object):
       mention_speaker_ids,
       speaker_ids,
       genre_emb,
+      tf.expand_dims(start_scores, 1),
+      tf.expand_dims(end_scores, 1),
       k
     ) # [num_mentions, max_ant + 1]
 
@@ -293,6 +297,7 @@ class CorefModel(object):
     gold_scores = antecedent_scores + tf.log(tf.to_float(antecedent_labels)) # [num_mentions, max_ant + 1]
     marginalized_gold_scores = tf.reduce_logsumexp(gold_scores, [1]) # [num_mentions]
     log_norm = tf.reduce_logsumexp(antecedent_scores, [1]) # [num_mentions]
+    self.gold_loss = tf.reduce_sum(marginalized_gold_scores)
     return log_norm - marginalized_gold_scores # [num_mentions]
 
   def softmax_loss_graph(self, antecedent_scores, antecedent_labels):
@@ -312,6 +317,8 @@ class CorefModel(object):
                             mention_speaker_ids,
                             speaker_ids,
                             genre_emb,
+                            start_scores,
+                            end_scores,
                             k):
     num_mentions = util.shape(mention_emb, 0)
     num_words = util.shape(word_nemb, 0)
@@ -321,19 +328,19 @@ class CorefModel(object):
 
     if self.config["use_metadata"]:
       antecedent_speaker_ids = tf.gather(mention_speaker_ids, antecedents) # [num_mentions, max_ant]
-      word_speaker_ids = tf.tile(tf.extend_dims(speaker_ids, 0), [k, 1])
+      word_speaker_ids = tf.tile(tf.expand_dims(speaker_ids, 0), [k, 1])
       same_speaker = tf.equal(tf.expand_dims(mention_speaker_ids, 1), word_speaker_ids)
       # same_speaker = tf.equal(tf.expand_dims(mention_speaker_ids, 1), antecedent_speaker_ids) # [num_mentions, max_ant]
       speaker_pair_emb = tf.gather(tf.get_variable("same_speaker_emb", [2, self.config["feature_size"]]), tf.to_int32(same_speaker)) # [num_mentions, max_ant, emb]
       feature_emb_list.append(speaker_pair_emb)
 
-      tiled_genre_emb = tf.tile(tf.expand_dims(tf.expand_dims(genre_emb, 0), 0), [num_mentions, max_antecedents, 1]) # [num_mentions, max_ant, emb]
+      tiled_genre_emb = tf.tile(tf.expand_dims(tf.expand_dims(genre_emb, 0), 0), [num_mentions, num_words, 1]) # [num_mentions, max_ant, emb]
       feature_emb_list.append(tiled_genre_emb)
 
     if self.config["use_features"]:
       # target_indices = tf.range(num_mentions) # [num_mentions]
       target_indices = tf.range(num_words) # [num_mentions]
-      mention_distance = tf.tile(tf.expand_dims(mention_starts, 1), [1, num_words]) - tf.expand_dims(target_indices, 1) # [num_mentions, max_ant]
+      mention_distance = tf.tile(tf.expand_dims(mention_starts, 1), [1, num_words]) - tf.tile(tf.expand_dims(target_indices, 0), [k, 1]) # [num_mentions, max_ant]
       mention_distance_bins = coref_ops.distance_bins(mention_distance) # [num_mentions, max_ant]
       mention_distance_bins.set_shape([None, None])
       mention_distance_emb = tf.gather(tf.get_variable("mention_distance_emb", [10, self.config["feature_size"]]), mention_distance_bins) # [num_mentions, max_ant]
@@ -343,7 +350,17 @@ class CorefModel(object):
     feature_emb = tf.nn.dropout(feature_emb, self.dropout) # [num_mentions, max_ant, emb]
 
     span_emb = tf.expand_dims(mention_emb, 0)
-    antecedent_scores = self.rgcn_tagging(span_emb, mention_scores, feature_emb, k) # [1, num_words, 100] ?
+    antecedent_scores = self.rgcn_tagging(span_emb,
+      word_nemb,
+      mention_starts,
+      mention_ends,
+      mention_scores,
+      feature_emb,
+      start_scores,
+      end_scores,
+      k
+    ) # [1, num_words, 100] ?
+    # antecedent_scores = tf.concat([tf.zeros(k, 1), antecedent_scores], 1)
     self.scores = antecedent_scores
 
     '''
@@ -368,7 +385,16 @@ class CorefModel(object):
     '''
     return antecedent_scores  # [num_mentions, max_ant + 1]
   
-  def rgcn_tagging(self, text_emb, mention_scores, antecedent_features, k):
+  def rgcn_tagging(self,
+      text_emb,
+      word_nemb,
+      mention_starts,
+      mention_ends,
+      mention_scores,
+      antecedent_features,
+      start_scores,
+      end_scores,
+      k):
     num_sentences = tf.shape(text_emb)[0]
     max_sentence_length = tf.gather(tf.shape(text_emb), [1])
 
@@ -376,7 +402,19 @@ class CorefModel(object):
     inputs = tf.transpose(text_emb, [1, 0, 2]) # [max_sentence_length, num_sentences, emb]
 
     with tf.variable_scope("rgcn_cell"):
-      self.cell_fw = util.RecurrentMemNNCell(inputs, self.config["lstm_size"], num_sentences, self.dropout, mention_scores, antecedent_features, k)
+      self.cell_fw = util.RecurrentMemNNCell(inputs,
+        self.config["lstm_size"],
+        num_sentences,
+        self.dropout,
+        mention_scores,
+        antecedent_features,
+        word_nemb,
+        mention_starts,
+        mention_ends,
+        start_scores,
+        end_scores,
+        k
+      )
       # self.hist_shape = self.cell_fw.hist_shape
       preprocessed_inputs_fw = self.cell_fw.preprocess_input(inputs, mention_scores, antecedent_features)
       input_scores = tf.reshape(mention_scores, [-1, 1, 1])
